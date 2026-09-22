@@ -1,0 +1,139 @@
+---
+- name: Derive base DN from domain
+  ansible.builtin.set_fact:
+    _base_dn: "dc={{ freeipa.domain.split('.') | join(',dc=') }}"
+
+# --------------------------------------------------------------------------
+# Kerberos ticket — all ipa CLI commands require an active ticket
+# --------------------------------------------------------------------------
+- name: Obtain Kerberos admin ticket inside container
+  ansible.builtin.shell: |
+    echo "{{ freeipa.admin_password }}" | \
+      podman exec -i {{ freeipa.container_name }} \
+      kinit admin@{{ freeipa.realm }}
+  changed_when: false
+  no_log: true
+
+# --------------------------------------------------------------------------
+# LDAP service account (used by OCP IDP and GroupSync CronJob)
+# --------------------------------------------------------------------------
+- name: Create LDAP service account
+  ansible.builtin.shell: |
+    podman exec {{ freeipa.container_name }} \
+      ipa user-show {{ freeipa_ldap_service_account.username }} 2>/dev/null || \
+    podman exec {{ freeipa.container_name }} bash -c "
+      echo '{{ freeipa_ldap_service_account.password }}' | \
+      ipa user-add {{ freeipa_ldap_service_account.username }} \
+        --first='{{ freeipa_ldap_service_account.first_name }}' \
+        --last='{{ freeipa_ldap_service_account.last_name }}' \
+        --password
+    "
+  changed_when: true
+  no_log: true
+
+- name: Set LDAP service account password to never expire
+  ansible.builtin.shell: |
+    podman exec {{ freeipa.container_name }} \
+      ipa user-mod {{ freeipa_ldap_service_account.username }} \
+      --setattr=krbPasswordExpiration=20380119031407Z
+  changed_when: true
+
+# --------------------------------------------------------------------------
+# OCP groups
+# --------------------------------------------------------------------------
+- name: Create OCP groups
+  ansible.builtin.shell: |
+    podman exec {{ freeipa.container_name }} \
+      ipa group-show {{ item }} 2>/dev/null || \
+    podman exec {{ freeipa.container_name }} \
+      ipa group-add {{ item }} --desc="OpenShift {{ item }}"
+  loop: "{{ freeipa_ocp_groups }}"
+  changed_when: true
+
+# --------------------------------------------------------------------------
+# OCP test users
+# --------------------------------------------------------------------------
+- name: Create OCP test users
+  ansible.builtin.shell: |
+    podman exec {{ freeipa.container_name }} \
+      ipa user-show {{ item.username }} 2>/dev/null || \
+    podman exec {{ freeipa.container_name }} bash -c "
+      echo '{{ item.password }}' | \
+      ipa user-add {{ item.username }} \
+        --first='{{ item.first_name }}' \
+        --last='{{ item.last_name }}' \
+        --password
+    "
+  loop: "{{ freeipa_ocp_users }}"
+  changed_when: true
+  no_log: true
+
+- name: Set test user passwords to never expire
+  ansible.builtin.shell: |
+    podman exec {{ freeipa.container_name }} \
+      ipa user-mod {{ item.username }} \
+      --setattr=krbPasswordExpiration=20380119031407Z
+  loop: "{{ freeipa_ocp_users }}"
+  changed_when: true
+
+- name: Add users to their groups
+  ansible.builtin.shell: |
+    podman exec {{ freeipa.container_name }} \
+      ipa group-add-member {{ item.1 }} \
+      --users={{ item.0.username }} 2>/dev/null || true
+  loop: "{{ freeipa_ocp_users | subelements('groups') }}"
+  changed_when: true
+
+# --------------------------------------------------------------------------
+# Summary: print OCP inventory snippets ready to paste
+# --------------------------------------------------------------------------
+- name: Print OCP inventory snippets
+  ansible.builtin.debug:
+    msg:
+      - "======================================================================"
+      - "FreeIPA test data created. Add these to your OCP inventory:"
+      - "======================================================================"
+      - ""
+      - "ldap:"
+      - "  name: \"freeipa\""
+      - "  url: \"ldap://{{ ansible_host | default(ansible_default_ipv4.address) }}:389/cn=users,cn=accounts,{{ _base_dn }}?uid\""
+      - "  bind_dn: \"uid={{ freeipa_ldap_service_account.username }},cn=users,cn=accounts,{{ _base_dn }}\""
+      - "  bind_password: \"{{ freeipa_ldap_service_account.password }}\""
+      - "  insecure: false"
+      - "  ca_cert: \"{{ lookup('file', lookup('env','HOME') + '/freeipa-ca.crt') }}\""
+      - "  attributes:"
+      - "    id: [\"dn\"]"
+      - "    email: [\"mail\"]"
+      - "    name: [\"cn\"]"
+      - "    preferred_username: [\"uid\"]"
+      - ""
+      - "rbac_bindings:"
+      - "  - group: \"openshift-admins\""
+      - "    cluster_role: \"cluster-admin\""
+      - "  - group: \"openshift-developers\""
+      - "    cluster_role: \"edit\""
+      - "  - group: \"openshift-viewers\""
+      - "    cluster_role: \"view\""
+      - ""
+      - "groupsync:"
+      - "  schedule: \"0 * * * *\""
+      - "  ldap_url: \"ldap://{{ ansible_host | default(ansible_default_ipv4.address) }}:389\""
+      - "  bind_dn: \"uid={{ freeipa_ldap_service_account.username }},cn=users,cn=accounts,{{ _base_dn }}\""
+      - "  bind_password: \"{{ freeipa_ldap_service_account.password }}\""
+      - "  ca_cert: \"{{ lookup('file', lookup('env','HOME') + '/freeipa-ca.crt') }}\""
+      - "  groups_base_dn: \"cn=groups,cn=accounts,{{ _base_dn }}\""
+      - "  groups_filter: \"(&(objectClass=ipausergroup)(cn=openshift-*))\""
+      - "  users_base_dn: \"cn=users,cn=accounts,{{ _base_dn }}\""
+      - "  group_uid_attribute: \"dn\""
+      - "  group_name_attributes: [\"cn\"]"
+      - "  group_membership_attributes: [\"member\"]"
+      - "  user_uid_attribute: \"dn\""
+      - "  user_name_attributes: [\"uid\"]"
+      - "  tolerate_member_not_found: true"
+      - "  tolerate_member_out_of_scope: true"
+      - ""
+      - "======================================================================"
+      - "Test users created:"
+      - "{% for u in freeipa_ocp_users %}  {{ u.username }} / {{ u.password }}  → {{ u.groups | join(', ') }}{% endfor %}"
+      - "LDAP bind account: {{ freeipa_ldap_service_account.username }} / {{ freeipa_ldap_service_account.password }}"
+      - "======================================================================"

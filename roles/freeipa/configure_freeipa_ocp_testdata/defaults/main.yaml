@@ -1,0 +1,41 @@
+---
+# Container name must match the value used in install_freeipa_server
+freeipa:
+  container_name: "freeipa"
+  admin_password: "ChangeMe123!"
+  realm: "EXAMPLE.COM"
+  domain: "example.com"
+
+# LDAP service account OCP will use for bind operations
+freeipa_ldap_service_account:
+  username: "ldap-svc"
+  first_name: "LDAP"
+  last_name: "ServiceAccount"
+  password: "ChangeMe123!"
+
+# Groups to create — names also used as OCP RBAC group targets
+freeipa_ocp_groups:
+  - openshift-admins
+  - openshift-developers
+  - openshift-viewers
+
+# Test users: username, password, and which groups to add them to
+freeipa_ocp_users:
+  - username: ocp-admin
+    first_name: OCP
+    last_name: Admin
+    password: "ChangeMe123!"
+    groups:
+      - openshift-admins
+  - username: ocp-dev
+    first_name: OCP
+    last_name: Developer
+    password: "ChangeMe123!"
+    groups:
+      - openshift-developers
+  - username: ocp-viewer
+    first_name: OCP
+    last_name: Viewer
+    password: "ChangeMe123!"
+    groups:
+      - openshift-viewers

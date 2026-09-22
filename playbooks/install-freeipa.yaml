@@ -1,0 +1,33 @@
+---
+# ==============================================================================
+# Install FreeIPA Server and (optionally) create OCP test users and groups
+# ==============================================================================
+# Run from the playbooks/ directory:
+#   ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml
+#
+# To skip test data creation:
+#   ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml --skip-tags testdata
+# ==============================================================================
+- name: Install FreeIPA Server
+  hosts: freeipa_server
+  gather_facts: true
+  become: true
+  tags: ['freeipa']
+  tasks:
+    - name: Install FreeIPA Server
+      ansible.builtin.include_role:
+        name: freeipa/install_freeipa_server
+
+- name: Configure OCP Test Users and Groups
+  hosts: freeipa_server
+  gather_facts: false
+  become: false
+  tags: ['testdata']
+  tasks:
+    - name: Create OCP test data in FreeIPA
+      ansible.builtin.include_role:
+        name: freeipa/configure_freeipa_ocp_testdata
+      when: >
+        (freeipa_ocp_groups | default([]) | length > 0) or
+        (freeipa_ocp_users | default([]) | length > 0) or
+        (freeipa_ldap_service_account is defined)

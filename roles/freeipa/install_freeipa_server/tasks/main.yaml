@@ -1,0 +1,169 @@
+---
+- name: Assert required variables are defined
+  ansible.builtin.assert:
+    that:
+      - freeipa.hostname is defined and freeipa.hostname != ""
+      - freeipa.domain is defined and freeipa.domain != ""
+      - freeipa.realm is defined and freeipa.realm != ""
+      - freeipa.admin_password is defined
+      - freeipa.directory_manager_password is defined
+    fail_msg: "freeipa.hostname, domain, realm, admin_password, and directory_manager_password must all be defined"
+
+# --------------------------------------------------------------------------
+# Host preparation
+# --------------------------------------------------------------------------
+- name: Set hostname on the host
+  ansible.builtin.hostname:
+    name: "{{ freeipa.hostname }}"
+
+- name: Ensure hostname resolves locally
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "^{{ ansible_default_ipv4.address }}\\s+{{ freeipa.hostname }}"
+    line: "{{ ansible_default_ipv4.address }}  {{ freeipa.hostname }}  {{ freeipa.hostname.split('.')[0] }}"
+    state: present
+
+- name: Ensure podman is installed
+  ansible.builtin.dnf:
+    name: podman
+    state: present
+
+- name: Create FreeIPA data directory
+  ansible.builtin.file:
+    path: "{{ freeipa.data_dir }}"
+    state: directory
+    mode: '0755'
+
+# --------------------------------------------------------------------------
+# Pull image
+# --------------------------------------------------------------------------
+- name: Pull FreeIPA image
+  ansible.builtin.command: podman pull {{ freeipa.image }}
+  changed_when: true
+  register: _pull_result
+  retries: 3
+  delay: 10
+  until: _pull_result.rc == 0
+
+# --------------------------------------------------------------------------
+# Container lifecycle — skip if already running
+# --------------------------------------------------------------------------
+- name: Check if FreeIPA container already exists
+  ansible.builtin.command: podman inspect {{ freeipa.container_name }}
+  register: _container_exists
+  changed_when: false
+  failed_when: false
+
+- name: Start existing container if stopped
+  ansible.builtin.command: podman start {{ freeipa.container_name }}
+  when:
+    - _container_exists.rc == 0
+    - (_container_exists.stdout | from_json)[0].State.Status != 'running'
+  changed_when: true
+
+- name: Initialize FreeIPA server container (first run — takes 5-10 minutes)
+  ansible.builtin.command: >
+    podman run -d
+    --name {{ freeipa.container_name }}
+    --hostname {{ freeipa.hostname }}
+    {% for port in freeipa_ports %}-p {{ port }} {% endfor %}
+    -v {{ freeipa.data_dir }}:/data:Z
+    --sysctl net.ipv6.conf.lo.disable_ipv6=0
+    {{ freeipa.image }}
+    ipa-server-install
+    --unattended
+    --hostname={{ freeipa.hostname }}
+    --domain={{ freeipa.domain }}
+    --realm={{ freeipa.realm }}
+    --admin-password={{ freeipa.admin_password }}
+    --ds-password={{ freeipa.directory_manager_password }}
+    --no-ntp
+    --setup-dns
+    --auto-reverse
+    --allow-zone-overlap
+    --no-dnssec-validation
+    --forwarder=8.8.8.8
+  when: _container_exists.rc != 0
+  changed_when: true
+  no_log: true
+
+# --------------------------------------------------------------------------
+# Wait for LDAP to be ready
+# --------------------------------------------------------------------------
+- name: Wait for FreeIPA LDAP to accept connections
+  ansible.builtin.shell: >
+    podman exec {{ freeipa.container_name }}
+    ldapsearch -x -H ldap://localhost:389
+    -b "" -s base namingContexts 2>/dev/null
+  register: _ldap_ready
+  until: _ldap_ready.rc == 0
+  retries: "{{ (freeipa_init_timeout / 15) | int }}"
+  delay: 15
+  changed_when: false
+
+# --------------------------------------------------------------------------
+# Systemd unit for persistence across reboots
+# --------------------------------------------------------------------------
+- name: Generate systemd unit for FreeIPA container
+  ansible.builtin.command: >
+    podman generate systemd
+    --name {{ freeipa.container_name }}
+    --restart-policy=always
+    --files
+    --new
+  args:
+    chdir: /etc/systemd/system
+  register: _systemd_gen
+  changed_when: true
+  when: _container_exists.rc != 0
+
+- name: Reload systemd and enable FreeIPA container service
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: "container-{{ freeipa.container_name }}.service"
+    enabled: true
+  when: _container_exists.rc != 0
+
+# --------------------------------------------------------------------------
+# Fetch CA certificate for use in OCP inventory
+# --------------------------------------------------------------------------
+- name: Fetch FreeIPA CA certificate
+  ansible.builtin.shell: >
+    podman exec {{ freeipa.container_name }}
+    cat /etc/ipa/ca.crt
+  register: _ipa_ca_cert
+  changed_when: false
+
+- name: Write CA certificate to control node
+  ansible.builtin.copy:
+    content: "{{ _ipa_ca_cert.stdout }}"
+    dest: "{{ lookup('env', 'HOME') }}/freeipa-ca.crt"
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+
+# --------------------------------------------------------------------------
+# Summary
+# --------------------------------------------------------------------------
+- name: Derive base DN from domain
+  ansible.builtin.set_fact:
+    _base_dn: "dc={{ freeipa.domain.split('.') | join(',dc=') }}"
+
+- name: Print FreeIPA connection details
+  ansible.builtin.debug:
+    msg:
+      - "======================================================================"
+      - "FreeIPA Server Ready"
+      - "======================================================================"
+      - "Web UI:          https://{{ freeipa.hostname }}"
+      - "Admin user:      admin"
+      - "Admin password:  {{ freeipa.admin_password }}"
+      - ""
+      - "LDAP URL:        ldap://{{ ansible_host | default(ansible_default_ipv4.address) }}:389"
+      - "LDAPS URL:       ldaps://{{ ansible_host | default(ansible_default_ipv4.address) }}:636"
+      - "Base DN:         {{ _base_dn }}"
+      - "Users DN:        cn=users,cn=accounts,{{ _base_dn }}"
+      - "Groups DN:       cn=groups,cn=accounts,{{ _base_dn }}"
+      - ""
+      - "CA cert saved to: ~/freeipa-ca.crt (on control node)"
+      - "======================================================================"
