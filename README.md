@@ -100,7 +100,7 @@ all:
             directory_manager_password: "RedHat123!"
             container_name: "freeipa"
             data_dir: "/opt/freeipa/data"
-            image: "quay.io/freeipa/freeipa-server:fedora-41"
+            image: "quay.io/freeipa/freeipa-server:rocky-9"
 
           # LDAP service account — OCP will use this for bind operations
           freeipa_ldap_service_account:

@@ -7,7 +7,7 @@ freeipa:
   directory_manager_password: "ChangeMe123!"
   container_name: "freeipa"
   data_dir: "/opt/freeipa/data"
-  image: "quay.io/freeipa/freeipa-server:fedora-41"
+  image: "quay.io/freeipa/freeipa-server:rocky-9"
 
 # Ports exposed on the host
 freeipa_ports:
