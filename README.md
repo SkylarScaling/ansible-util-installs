@@ -35,7 +35,7 @@ Installs a FreeIPA server as a Podman container on a target host, then creates a
 
 - Target host running RHEL 8+, RHEL 9, or Fedora (must have `dnf`)
 - `podman` installed (the role installs it if missing)
-- SSH access from your control node, or run directly on the host with `ansible_connection: local`
+- SSH access from your local machine to the jumphost (key at `~/.ssh/id_ed25519`)
 - At least **2 GB free RAM** on the target host
 - Ports 389, 636, 80, 443, 88, 464 free on the target host
 
