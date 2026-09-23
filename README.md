@@ -39,6 +39,16 @@ Installs a FreeIPA server as a Podman container on a target host, then creates a
 - At least **2 GB free RAM** on the target host
 - Ports 389, 636, 80, 443, 88, 464 free on the target host
 
+### Workflow
+
+Run from your **local machine** after the jumphost has been provisioned and configured. The playbook SSHes to the jumphost and installs FreeIPA there — the same SSH pattern used by `provision-jumphost.yaml` Play 2.
+
+```
+1. ansible-playbook provision-jumphost.yaml -i inventory.yaml   # creates jumphost
+2. ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml  # installs FreeIPA on it
+3. ansible-playbook hub-spoke-disconnected-setup.yaml ...       # deploy OCP (from jumphost)
+```
+
 ### Run
 
 ```bash
@@ -60,18 +70,18 @@ ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml --tags testdata
 
 ### Example Inventory
 
+The jumphost public DNS name comes from the output of `provision-jumphost.yaml` — it is printed in the final summary as `Public DNS`.
+
 ```yaml
 all:
   children:
     freeipa_server:
       hosts:
         jumphost:
-          # Run via SSH from your workstation:
-          ansible_host: "ec2-<public-ip>.us-east-2.compute.amazonaws.com"
+          ansible_host: "ec2-<public-ip>.<region>.compute.amazonaws.com"
           ansible_user: "ec2-user"
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
-          # OR — run locally on the host itself:
-          # ansible_connection: local
+          ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
           # FreeIPA server settings
           freeipa:
@@ -119,7 +129,7 @@ all:
                 - openshift-viewers
 ```
 
-> **Note on hostname resolution:** FreeIPA requires its hostname to resolve to the host's IP. The role adds a `/etc/hosts` entry automatically using `ansible_default_ipv4.address`. If your cluster nodes need to reach FreeIPA by hostname, you'll need either a DNS record or a hosts entry on each node — or use the IP address directly in the OCP `ldap.url`.
+> **Note on hostname:** FreeIPA requires its `hostname` to resolve to the host's IP. The role writes a `/etc/hosts` entry automatically using the jumphost's primary interface IP, so the container initialises correctly. For the OCP `ldap.url` and `groupsync.ldap_url`, use the jumphost's **private IP or private DNS name** so cluster nodes can reach it within the VPC — the public DNS name is only reachable from outside AWS. The final summary prints both the LDAP URL and OCP snippet with the correct address.
 
 ---
 
