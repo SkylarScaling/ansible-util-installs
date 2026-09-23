@@ -74,20 +74,30 @@ The jumphost public DNS name comes from the output of `provision-jumphost.yaml` 
 
 ```yaml
 all:
+  vars:
+    # -----------------------------------------------------------------------
+    # Update these two values when you provision a new test environment.
+    # Everything else is derived from them.
+    # -----------------------------------------------------------------------
+    sandbox_id: "sandbox2915"                                      # changes each test environment
+    jumphost_public_dns: "ec2-<public-ip>.us-east-2.compute.amazonaws.com"  # from provision-jumphost output
+
+    sandbox_domain: "{{ sandbox_id }}.opentlc.com"
+
   children:
     freeipa_server:
       hosts:
         jumphost:
-          ansible_host: "ec2-<public-ip>.<region>.compute.amazonaws.com"
+          ansible_host: "{{ jumphost_public_dns }}"
           ansible_user: "ec2-user"
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
           ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-          # FreeIPA server settings
+          # FreeIPA server settings — domain/realm derived from sandbox_domain
           freeipa:
-            hostname: "ipa.sandbox2915.opentlc.com"   # must resolve to the host IP
-            domain: "sandbox2915.opentlc.com"
-            realm: "SANDBOX2915.OPENTLC.COM"           # uppercase domain
+            hostname: "ipa.{{ sandbox_domain }}"
+            domain: "{{ sandbox_domain }}"
+            realm: "{{ sandbox_domain | upper }}"
             admin_password: "RedHat123!"
             directory_manager_password: "RedHat123!"
             container_name: "freeipa"
@@ -139,10 +149,11 @@ After a successful run, the playbook prints the exact blocks to add to your OCP 
 
 ```yaml
 # In your OCP inventory all.vars:
+# (replace the dc= values with your actual base DN printed at end of install run)
 
 ldap:
   name: "freeipa"
-  url: "ldap://<freeipa-host-ip>:389/cn=users,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com?uid"
+  url: "ldap://<freeipa-private-ip>:389/cn=users,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com?uid"
   bind_dn: "uid=ldap-svc,cn=users,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com"
   bind_password: "ServicePassword123!"
   insecure: false
