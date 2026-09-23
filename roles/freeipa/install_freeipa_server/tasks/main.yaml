@@ -54,11 +54,19 @@
   changed_when: false
   failed_when: false
 
+- name: Set container state facts
+  ansible.builtin.set_fact:
+    _container_is_new: "{{ _container_exists.rc != 0 }}"
+    _container_status: >-
+      {{ (_container_exists.stdout | from_json)[0].State.Status
+         if _container_exists.rc == 0
+         else 'missing' }}
+
 - name: Start existing container if stopped
   ansible.builtin.command: podman start {{ freeipa.container_name }}
   when:
-    - _container_exists.rc == 0
-    - (_container_exists.stdout | from_json)[0].State.Status != 'running'
+    - not _container_is_new
+    - _container_status != 'running'
   changed_when: true
 
 - name: Initialize FreeIPA server container (first run — takes 5-10 minutes)
@@ -83,12 +91,15 @@
     --allow-zone-overlap
     --no-dnssec-validation
     --forwarder=8.8.8.8
-  when: _container_exists.rc != 0
+  when: _container_is_new
   changed_when: true
   no_log: true
 
 # --------------------------------------------------------------------------
-# Wait for LDAP to be ready
+# Wait for full IPA initialization
+# LDAP (Directory Server) starts well before the PKI (Dogtag) and HTTP
+# finish. We wait for both checkpoints so downstream tasks never run
+# against a partially-initialized server.
 # --------------------------------------------------------------------------
 - name: Wait for FreeIPA LDAP to accept connections
   ansible.builtin.shell: >
@@ -112,7 +123,11 @@
   changed_when: false
 
 # --------------------------------------------------------------------------
-# Systemd unit for persistence across reboots
+# Systemd unit for persistence across reboots.
+# Uses start/stop mode (no --new) so on reboot systemd runs
+# 'podman start <name>' against the existing container rather than
+# re-running 'podman run ... ipa-server-install', which would attempt
+# to re-initialize an already-initialized server.
 # --------------------------------------------------------------------------
 - name: Generate systemd unit for FreeIPA container
   ansible.builtin.command: >
@@ -120,19 +135,17 @@
     --name {{ freeipa.container_name }}
     --restart-policy=always
     --files
-    --new
   args:
     chdir: /etc/systemd/system
-  register: _systemd_gen
   changed_when: true
-  when: _container_exists.rc != 0
+  when: _container_is_new
 
-- name: Reload systemd and enable FreeIPA container service
+- name: Enable FreeIPA container service (start on boot)
   ansible.builtin.systemd:
     daemon_reload: true
     name: "container-{{ freeipa.container_name }}.service"
     enabled: true
-  when: _container_exists.rc != 0
+  when: _container_is_new
 
 # --------------------------------------------------------------------------
 # Fetch CA certificate for use in OCP inventory
