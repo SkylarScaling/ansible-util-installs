@@ -101,6 +101,16 @@
   delay: 15
   changed_when: false
 
+- name: Wait for FreeIPA CA certificate to be generated (PKI finishes after LDAP)
+  ansible.builtin.shell: >
+    podman exec {{ freeipa.container_name }}
+    test -f /etc/ipa/ca.crt
+  register: _ca_ready
+  until: _ca_ready.rc == 0
+  retries: "{{ (freeipa_init_timeout / 15) | int }}"
+  delay: 15
+  changed_when: false
+
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
 # --------------------------------------------------------------------------
