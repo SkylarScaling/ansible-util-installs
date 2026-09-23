@@ -10,7 +10,7 @@
     fail_msg: "freeipa.hostname, domain, realm, admin_password, and directory_manager_password must all be defined"
 
 # --------------------------------------------------------------------------
-# Host preparation
+# Host preparation (all idempotent)
 # --------------------------------------------------------------------------
 - name: Set hostname on the host
   ansible.builtin.hostname:
@@ -34,9 +34,6 @@
     state: directory
     mode: '0755'
 
-# --------------------------------------------------------------------------
-# Pull image
-# --------------------------------------------------------------------------
 - name: Pull FreeIPA image
   ansible.builtin.command: podman pull {{ freeipa.image }}
   changed_when: true
@@ -46,30 +43,75 @@
   until: _pull_result.rc == 0
 
 # --------------------------------------------------------------------------
-# Container lifecycle — skip if already running
+# Determine current state
 # --------------------------------------------------------------------------
-- name: Check if FreeIPA container already exists
+- name: Check if FreeIPA container exists
   ansible.builtin.command: podman inspect {{ freeipa.container_name }}
-  register: _container_exists
+  register: _container_inspect
   changed_when: false
   failed_when: false
 
 - name: Set container state facts
   ansible.builtin.set_fact:
-    _container_is_new: "{{ _container_exists.rc != 0 }}"
+    _container_exists: "{{ _container_inspect.rc == 0 }}"
     _container_status: >-
-      {{ (_container_exists.stdout | from_json)[0].State.Status
-         if _container_exists.rc == 0
-         else 'missing' }}
+      {{ (_container_inspect.stdout | from_json)[0].State.Status
+         if _container_inspect.rc == 0 else 'missing' }}
 
 - name: Start existing container if stopped
   ansible.builtin.command: podman start {{ freeipa.container_name }}
-  when:
-    - not _container_is_new
-    - _container_status != 'running'
+  when: _container_exists and _container_status != 'running'
   changed_when: true
 
-- name: Initialize FreeIPA server container (first run — takes 5-10 minutes)
+# Check whether IPA actually finished initializing (CA cert is the last
+# artifact written by ipa-server-install). If the container exists but
+# the cert is missing, initialization was interrupted and we must recover.
+- name: Check if FreeIPA initialization completed (CA cert present)
+  ansible.builtin.shell: >
+    podman exec {{ freeipa.container_name }}
+    test -f /etc/ipa/ca.crt
+  register: _ipa_initialized
+  changed_when: false
+  failed_when: false
+  when: _container_exists
+
+# --------------------------------------------------------------------------
+# Automatic recovery from incomplete initialization
+# --------------------------------------------------------------------------
+- name: Remove incomplete FreeIPA container
+  ansible.builtin.command: podman rm -f {{ freeipa.container_name }}
+  when:
+    - _container_exists
+    - _ipa_initialized.rc != 0
+  changed_when: true
+
+- name: Wipe partial FreeIPA data directory
+  ansible.builtin.file:
+    path: "{{ freeipa.data_dir }}"
+    state: absent
+  when:
+    - _container_exists
+    - _ipa_initialized.rc != 0
+
+- name: Recreate FreeIPA data directory after wipe
+  ansible.builtin.file:
+    path: "{{ freeipa.data_dir }}"
+    state: directory
+    mode: '0755'
+  when:
+    - _container_exists
+    - _ipa_initialized.rc != 0
+
+- name: Set initialization flag
+  ansible.builtin.set_fact:
+    _needs_init: >-
+      {{ not _container_exists or
+         (_ipa_initialized is defined and _ipa_initialized.rc != 0) }}
+
+# --------------------------------------------------------------------------
+# Initialize (only when needed — new or recovered from bad state)
+# --------------------------------------------------------------------------
+- name: Initialize FreeIPA server container (takes 5-10 minutes)
   ansible.builtin.command: >
     podman run -d
     --name {{ freeipa.container_name }}
@@ -91,15 +133,14 @@
     --allow-zone-overlap
     --no-dnssec-validation
     --forwarder=8.8.8.8
-  when: _container_is_new
+  when: _needs_init
   changed_when: true
   no_log: true
 
 # --------------------------------------------------------------------------
 # Wait for full IPA initialization
-# LDAP (Directory Server) starts well before the PKI (Dogtag) and HTTP
-# finish. We wait for both checkpoints so downstream tasks never run
-# against a partially-initialized server.
+# LDAP (Directory Server) starts well before the PKI (Dogtag) finishes.
+# Both checkpoints must pass before we treat the server as ready.
 # --------------------------------------------------------------------------
 - name: Wait for FreeIPA LDAP to accept connections
   ansible.builtin.shell: >
@@ -111,6 +152,7 @@
   retries: "{{ (freeipa_init_timeout / 15) | int }}"
   delay: 15
   changed_when: false
+  when: _needs_init
 
 - name: Wait for FreeIPA CA certificate to be generated (PKI finishes after LDAP)
   ansible.builtin.shell: >
@@ -121,13 +163,12 @@
   retries: "{{ (freeipa_init_timeout / 15) | int }}"
   delay: 15
   changed_when: false
+  when: _needs_init
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots.
-# Uses start/stop mode (no --new) so on reboot systemd runs
-# 'podman start <name>' against the existing container rather than
-# re-running 'podman run ... ipa-server-install', which would attempt
-# to re-initialize an already-initialized server.
+# No --new flag: unit calls 'podman start <name>' on boot, not
+# 'podman run ... ipa-server-install', which would re-run the install.
 # --------------------------------------------------------------------------
 - name: Generate systemd unit for FreeIPA container
   ansible.builtin.command: >
@@ -138,14 +179,14 @@
   args:
     chdir: /etc/systemd/system
   changed_when: true
-  when: _container_is_new
+  when: _needs_init
 
 - name: Enable FreeIPA container service (start on boot)
   ansible.builtin.systemd:
     daemon_reload: true
     name: "container-{{ freeipa.container_name }}.service"
     enabled: true
-  when: _container_is_new
+  when: _needs_init
 
 # --------------------------------------------------------------------------
 # Fetch CA certificate for use in OCP inventory
