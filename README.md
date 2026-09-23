@@ -79,10 +79,8 @@ all:
     # Update these two values when you provision a new test environment.
     # Everything else is derived from them.
     # -----------------------------------------------------------------------
-    sandbox_id: "sandbox2915"                                      # changes each test environment
+    sandbox_domain: "sandbox2915.opentlc.com"                               # changes each test environment
     jumphost_public_dns: "ec2-<public-ip>.us-east-2.compute.amazonaws.com"  # from provision-jumphost output
-
-    sandbox_domain: "{{ sandbox_id }}.opentlc.com"
 
   children:
     freeipa_server:
