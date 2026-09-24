@@ -63,9 +63,8 @@
   when: _container_exists and _container_status != 'running'
   changed_when: true
 
-# Check whether IPA actually finished initializing (CA cert is the last
-# artifact written by ipa-server-install). If the container exists but
-# the cert is missing, initialization was interrupted and we must recover.
+# Check whether IPA finished initializing. CA cert is the last artifact
+# written by ipa-server-install — its presence means init completed.
 - name: Check if FreeIPA initialization completed (CA cert present)
   ansible.builtin.shell: >
     podman exec {{ freeipa.container_name }}
@@ -82,6 +81,7 @@
   ansible.builtin.command: podman rm -f {{ freeipa.container_name }}
   when:
     - _container_exists
+    - _ipa_initialized is defined
     - _ipa_initialized.rc != 0
   changed_when: true
 
@@ -91,6 +91,7 @@
     state: absent
   when:
     - _container_exists
+    - _ipa_initialized is defined
     - _ipa_initialized.rc != 0
 
 - name: Recreate FreeIPA data directory after wipe
@@ -100,6 +101,7 @@
     mode: '0755'
   when:
     - _container_exists
+    - _ipa_initialized is defined
     - _ipa_initialized.rc != 0
 
 - name: Set initialization flag
@@ -109,7 +111,13 @@
          (_ipa_initialized is defined and _ipa_initialized.rc != 0) }}
 
 # --------------------------------------------------------------------------
-# Initialize (only when needed — new or recovered from bad state)
+# Initialize (only when needed)
+#
+# DNS setup (--setup-dns) is intentionally omitted. On EC2, port 53 is
+# held by the AWS resolver and the BIND install always fails. FreeIPA
+# works fine as a pure LDAP/Kerberos server without DNS.
+# --skip-conncheck suppresses connectivity pre-flight checks that
+# fail in container/NAT environments.
 # --------------------------------------------------------------------------
 - name: Initialize FreeIPA server container (takes 5-10 minutes)
   ansible.builtin.command: >
@@ -118,7 +126,6 @@
     --hostname {{ freeipa.hostname }}
     {% for port in freeipa_ports %}-p {{ port }} {% endfor %}
     -v {{ freeipa.data_dir }}:/data:Z
-    --sysctl net.ipv6.conf.lo.disable_ipv6=0
     {{ freeipa.image }}
     ipa-server-install
     --unattended
@@ -128,47 +135,39 @@
     --admin-password={{ freeipa.admin_password }}
     --ds-password={{ freeipa.directory_manager_password }}
     --no-ntp
-    --setup-dns
-    --auto-reverse
-    --allow-zone-overlap
-    --no-dnssec-validation
-    --forwarder=8.8.8.8
+    --skip-conncheck
   when: _needs_init
   changed_when: true
   no_log: true
 
 # --------------------------------------------------------------------------
-# Wait for full IPA initialization
-# LDAP (Directory Server) starts well before the PKI (Dogtag) finishes.
-# Both checkpoints must pass before we treat the server as ready.
+# Wait for full initialization.
+# Each iteration checks the container status first. If the container
+# exited (install failed), we capture the last 50 log lines and fail
+# immediately rather than retrying for another 15 minutes.
 # --------------------------------------------------------------------------
-- name: Wait for FreeIPA LDAP to accept connections
-  ansible.builtin.shell: >
-    podman exec {{ freeipa.container_name }}
-    ldapsearch -x -H ldap://localhost:389
-    -b "" -s base namingContexts 2>/dev/null
-  register: _ldap_ready
-  until: _ldap_ready.rc == 0
+- name: Wait for FreeIPA to fully initialize
+  ansible.builtin.shell: |
+    STATUS=$(podman inspect {{ freeipa.container_name }} \
+      --format '{{ "{{" }}.State.Status{{ "}}" }}' 2>/dev/null || echo "missing")
+    if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ] || [ "$STATUS" = "missing" ]; then
+      echo "Container exited during initialization (status: $STATUS)" >&2
+      echo "=== Last 50 log lines ===" >&2
+      podman logs --tail=50 {{ freeipa.container_name }} 2>&1 || true
+      exit 2
+    fi
+    podman exec {{ freeipa.container_name }} test -f /etc/ipa/ca.crt 2>/dev/null
+  register: _init_wait
+  until: _init_wait.rc == 0
   retries: "{{ (freeipa_init_timeout / 15) | int }}"
   delay: 15
   changed_when: false
-  when: _needs_init
-
-- name: Wait for FreeIPA CA certificate to be generated (PKI finishes after LDAP)
-  ansible.builtin.shell: >
-    podman exec {{ freeipa.container_name }}
-    test -f /etc/ipa/ca.crt
-  register: _ca_ready
-  until: _ca_ready.rc == 0
-  retries: "{{ (freeipa_init_timeout / 15) | int }}"
-  delay: 15
-  changed_when: false
+  failed_when: _init_wait.rc == 2
   when: _needs_init
 
 # --------------------------------------------------------------------------
-# Systemd unit for persistence across reboots.
-# No --new flag: unit calls 'podman start <name>' on boot, not
-# 'podman run ... ipa-server-install', which would re-run the install.
+# Systemd unit — start/stop mode (no --new) so reboots call
+# 'podman start' rather than re-running ipa-server-install.
 # --------------------------------------------------------------------------
 - name: Generate systemd unit for FreeIPA container
   ansible.builtin.command: >
