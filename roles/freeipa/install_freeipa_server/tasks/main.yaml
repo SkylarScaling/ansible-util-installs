@@ -43,8 +43,17 @@
   until: _pull_result.rc == 0
 
 # --------------------------------------------------------------------------
-# Determine current state
+# Determine current state.
+# The CA cert lives at {{ freeipa.data_dir }}/etc/ipa/ca.crt on the host
+# because the container symlinks /etc/ipa → /data/etc/ipa. Checking the
+# host path avoids 'podman exec' entirely, which fails if the container
+# is stopped or in any other non-running state.
 # --------------------------------------------------------------------------
+- name: Check if FreeIPA data directory has a completed installation
+  ansible.builtin.stat:
+    path: "{{ freeipa.data_dir }}/etc/ipa/ca.crt"
+  register: _ca_stat
+
 - name: Check if FreeIPA container exists
   ansible.builtin.command: podman inspect {{ freeipa.container_name }}
   register: _container_inspect
@@ -53,38 +62,19 @@
 
 - name: Set container state facts
   ansible.builtin.set_fact:
+    _ca_exists: "{{ _ca_stat.stat.exists | default(false) }}"
     _container_exists: "{{ _container_inspect.rc == 0 }}"
     _container_status: >-
       {{ (_container_inspect.stdout | from_json)[0].State.Status
          if _container_inspect.rc == 0 else 'missing' }}
 
-- name: Start existing container if stopped
-  ansible.builtin.command: podman start {{ freeipa.container_name }}
-  when: _container_exists and _container_status != 'running'
-  changed_when: true
-
-# Check whether IPA finished initializing. CA cert is the last artifact
-# written by ipa-server-install — its presence means init completed.
-- name: Check if FreeIPA initialization completed (CA cert present)
-  ansible.builtin.shell: >
-    podman exec {{ freeipa.container_name }}
-    test -f /etc/ipa/ca.crt
-  register: _ipa_initialized
-  changed_when: false
-  failed_when: false
-  when: _container_exists
-
 - name: Set initialization flag
   ansible.builtin.set_fact:
-    _needs_init: >-
-      {{ not _container_exists or
-         (_ipa_initialized is defined and _ipa_initialized.rc != 0) }}
+    _needs_init: "{{ not _ca_exists }}"
 
 # --------------------------------------------------------------------------
-# Automatic recovery from incomplete initialization.
-# Stop the systemd service FIRST to release ports before removing the
-# container — otherwise systemd immediately reclaims them and podman run
-# fails silently.
+# If a container exists but init never completed, remove it and start fresh.
+# Stop the systemd service first so it doesn't reclaim ports immediately.
 # --------------------------------------------------------------------------
 - name: Stop FreeIPA systemd service before recovery (releases ports)
   ansible.builtin.systemd:
@@ -92,48 +82,43 @@
     state: stopped
     enabled: false
   failed_when: false
-  when:
-    - _container_exists
-    - _ipa_initialized is defined
-    - _ipa_initialized.rc != 0
+  when: _needs_init and _container_exists
 
-- name: Remove incomplete FreeIPA container
+- name: Remove stale/incomplete FreeIPA container
   ansible.builtin.command: podman rm -f {{ freeipa.container_name }}
-  when:
-    - _container_exists
-    - _ipa_initialized is defined
-    - _ipa_initialized.rc != 0
+  when: _needs_init and _container_exists
   changed_when: true
 
 - name: Wipe partial FreeIPA data directory
   ansible.builtin.file:
     path: "{{ freeipa.data_dir }}"
     state: absent
-  when:
-    - _container_exists
-    - _ipa_initialized is defined
-    - _ipa_initialized.rc != 0
+  when: _needs_init and _container_exists
 
-- name: Recreate FreeIPA data directory after wipe
+- name: Recreate FreeIPA data directory
   ansible.builtin.file:
     path: "{{ freeipa.data_dir }}"
     state: directory
     mode: '0755'
-  when:
-    - _container_exists
-    - _ipa_initialized is defined
-    - _ipa_initialized.rc != 0
+  when: _needs_init and _container_exists
 
 # --------------------------------------------------------------------------
-# Initialize (only when needed — new or recovered from bad state)
-#
-# --privileged gives the container the capabilities it needs (SYS_RESOURCE
-# for RLIMIT, NET_ADMIN for loopback config) without having to enumerate
-# them per-host. Acceptable for a test LDAP environment.
-# --log-driver=k8s-file ensures 'podman logs' always works regardless of
-# the host's default log driver (which may be journald on RHEL systems).
-# DNS setup is omitted — port 53 conflicts with the AWS resolver and
-# FreeIPA works as a pure LDAP/Kerberos server without DNS.
+# Start existing running container if it already has a completed install
+# --------------------------------------------------------------------------
+- name: Start existing container if stopped (installation already complete)
+  ansible.builtin.command: podman start {{ freeipa.container_name }}
+  when: not _needs_init and _container_exists and _container_status != 'running'
+  changed_when: true
+
+# --------------------------------------------------------------------------
+# Initialize (only when needed).
+# --systemd=true    mounts cgroups rw so the in-container systemd can manage
+#                   IPA services (Directory Server, Kerberos, Apache, etc.)
+# --cap-add SYS_RESOURCE  allows setrlimit() calls in the IPA entrypoint
+# --log-driver=k8s-file   forces file-based logging (host default may be
+#                          journald, which makes 'podman logs' return empty)
+# DNS setup omitted: --setup-dns would bind port 53 which the AWS resolver
+# already owns. FreeIPA works as a pure LDAP/Kerberos server without DNS.
 # --------------------------------------------------------------------------
 - name: Initialize FreeIPA server container (takes 5-10 minutes)
   ansible.builtin.command: >
@@ -160,32 +145,59 @@
   no_log: true
 
 # --------------------------------------------------------------------------
-# Wait for full initialization.
-# Checks container status each iteration — if the container exits, capture
-# the last 50 log lines and fail immediately (rc=2) rather than retrying.
+# Wait for initialization by watching the host filesystem.
+# The FreeIPA container symlinks /etc/ipa → /data/etc/ipa, so the CA cert
+# appears at {{ freeipa.data_dir }}/etc/ipa/ca.crt on the host as soon as
+# ipa-server-install completes — no 'podman exec' required.
+# If it times out, the rescue block dumps full diagnostics.
 # --------------------------------------------------------------------------
-- name: Wait for FreeIPA to fully initialize
-  ansible.builtin.shell: |
-    STATUS=$(podman inspect {{ freeipa.container_name }} \
-      --format '{{ "{{" }}.State.Status{{ "}}" }}' 2>/dev/null || echo "missing")
-    if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ] || [ "$STATUS" = "missing" ]; then
-      echo "Container exited during initialization (status: $STATUS)" >&2
-      echo "=== Last 50 log lines ===" >&2
-      podman logs --tail=50 {{ freeipa.container_name }} 2>&1 || true
-      exit 2
-    fi
-    podman exec {{ freeipa.container_name }} test -f /etc/ipa/ca.crt 2>/dev/null
-  register: _init_wait
-  until: _init_wait.rc == 0
-  retries: "{{ (freeipa_init_timeout / 15) | int }}"
-  delay: 15
-  changed_when: false
-  failed_when: _init_wait.rc == 2
+- name: Wait for FreeIPA initialization (watching host filesystem)
   when: _needs_init
+  block:
+    - name: Wait for CA cert to appear in data volume
+      ansible.builtin.wait_for:
+        path: "{{ freeipa.data_dir }}/etc/ipa/ca.crt"
+        state: present
+        timeout: "{{ freeipa_init_timeout }}"
+        sleep: 15
+        msg: "Timed out waiting for FreeIPA CA cert at {{ freeipa.data_dir }}/etc/ipa/ca.crt"
+
+  rescue:
+    - name: Collect container diagnostics
+      ansible.builtin.shell: |
+        echo "=== Container status ==="
+        podman inspect {{ freeipa.container_name }} \
+          --format 'Status: {{ "{{" }}.State.Status{{ "}}" }}, ExitCode: {{ "{{" }}.State.ExitCode{{ "}}" }}' \
+          2>/dev/null || echo "Container not found"
+
+        echo ""
+        echo "=== podman logs (last 100 lines) ==="
+        podman logs --tail=100 {{ freeipa.container_name }} 2>&1 || echo "(no podman logs)"
+
+        echo ""
+        echo "=== journalctl for container (last 50 lines) ==="
+        journalctl CONTAINER_NAME={{ freeipa.container_name }} --no-pager -n 50 2>/dev/null \
+          || echo "(no journald entries)"
+
+        echo ""
+        echo "=== Data directory contents ==="
+        ls -la {{ freeipa.data_dir }}/ 2>/dev/null || echo "(data dir empty or missing)"
+      register: _diagnostics
+      changed_when: false
+      failed_when: false
+
+    - name: Show diagnostics
+      ansible.builtin.debug:
+        msg: "{{ _diagnostics.stdout_lines }}"
+
+    - name: Fail with diagnostic context
+      ansible.builtin.fail:
+        msg: >
+          FreeIPA initialization timed out or failed.
+          See diagnostic output above for container logs and status.
 
 # --------------------------------------------------------------------------
-# Systemd unit — start/stop mode (no --new) so reboots call
-# 'podman start' rather than re-running ipa-server-install.
+# Systemd unit — start/stop mode (no --new).
 # --------------------------------------------------------------------------
 - name: Generate systemd unit for FreeIPA container
   ansible.builtin.command: >
@@ -208,16 +220,14 @@
 # --------------------------------------------------------------------------
 # Fetch CA certificate for use in OCP inventory
 # --------------------------------------------------------------------------
-- name: Fetch FreeIPA CA certificate
-  ansible.builtin.shell: >
-    podman exec {{ freeipa.container_name }}
-    cat /etc/ipa/ca.crt
-  register: _ipa_ca_cert
-  changed_when: false
+- name: Fetch FreeIPA CA certificate from data volume
+  ansible.builtin.slurp:
+    src: "{{ freeipa.data_dir }}/etc/ipa/ca.crt"
+  register: _ca_cert_raw
 
 - name: Write CA certificate to control node
   ansible.builtin.copy:
-    content: "{{ _ipa_ca_cert.stdout }}"
+    content: "{{ _ca_cert_raw.content | b64decode }}"
     dest: "{{ lookup('env', 'HOME') }}/freeipa-ca.crt"
     mode: '0644'
   delegate_to: localhost
