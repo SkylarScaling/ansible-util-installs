@@ -46,7 +46,6 @@
   register: _result
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
-  no_log: true
 
 # --------------------------------------------------------------------------
 # Organisational Units
