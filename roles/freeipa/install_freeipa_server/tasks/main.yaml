@@ -140,7 +140,8 @@
     podman run -d
     --name {{ freeipa.container_name }}
     --hostname {{ freeipa.hostname }}
-    --privileged
+    --systemd=true
+    --cap-add SYS_RESOURCE
     --log-driver=k8s-file
     {% for port in freeipa_ports %}-p {{ port }} {% endfor %}
     -v {{ freeipa.data_dir }}:/data:Z
