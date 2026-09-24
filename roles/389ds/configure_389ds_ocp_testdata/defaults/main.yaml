@@ -1,0 +1,42 @@
+---
+ds389:
+  container_name: "389ds"
+  root_dn: "cn=Directory Manager"
+  root_password: "ChangeMe123!"
+  suffix: "dc=example,dc=com"
+
+ds389_ldap_port: 389
+
+# Service account OCP uses for LDAP bind operations
+ds389_ldap_service_account:
+  username: "ldap-svc"
+  cn: "LDAP Service Account"
+  sn: "ServiceAccount"
+  password: "ChangeMe123!"
+
+# Groups to create — names drive GroupSync filter (cn=openshift-*)
+ds389_ocp_groups:
+  - openshift-admins
+  - openshift-developers
+  - openshift-viewers
+
+# Test users and their group memberships
+ds389_ocp_users:
+  - username: ocp-admin
+    cn: "OCP Admin"
+    sn: "Admin"
+    password: "ChangeMe123!"
+    groups:
+      - openshift-admins
+  - username: ocp-dev
+    cn: "OCP Developer"
+    sn: "Developer"
+    password: "ChangeMe123!"
+    groups:
+      - openshift-developers
+  - username: ocp-viewer
+    cn: "OCP Viewer"
+    sn: "Viewer"
+    password: "ChangeMe123!"
+    groups:
+      - openshift-viewers

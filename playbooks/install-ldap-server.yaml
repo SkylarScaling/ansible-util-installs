@@ -1,0 +1,34 @@
+---
+# ==============================================================================
+# Install 389 Directory Server and create OCP test users and groups.
+# Replaces the earlier FreeIPA playbook — same purpose, no CA/Kerberos/Java.
+#
+# Run from the playbooks/ directory:
+#   ansible-playbook install-ldap-server.yaml -i inventory-ldap.yaml
+#
+# To skip test data creation:
+#   ansible-playbook install-ldap-server.yaml -i inventory-ldap.yaml --skip-tags testdata
+# ==============================================================================
+- name: Install 389 Directory Server
+  hosts: ldap_server
+  gather_facts: true
+  become: true
+  tags: ['389ds']
+  tasks:
+    - name: Install 389 DS
+      ansible.builtin.include_role:
+        name: 389ds/install_389ds_server
+
+- name: Configure OCP Test Users and Groups
+  hosts: ldap_server
+  gather_facts: true
+  become: true
+  tags: ['testdata']
+  tasks:
+    - name: Create OCP test data in 389 DS
+      ansible.builtin.include_role:
+        name: 389ds/configure_389ds_ocp_testdata
+      when: >
+        (ds389_ocp_groups | default([]) | length > 0) or
+        (ds389_ocp_users | default([]) | length > 0) or
+        (ds389_ldap_service_account is defined)

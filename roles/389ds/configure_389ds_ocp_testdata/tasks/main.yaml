@@ -1,0 +1,162 @@
+---
+- name: Install openldap-clients (provides ldapadd/ldapmodify)
+  ansible.builtin.dnf:
+    name: openldap-clients
+    state: present
+
+# Helper variable used throughout
+- name: Set LDAP connection facts
+  ansible.builtin.set_fact:
+    _ldap_url: "ldap://localhost:{{ ds389_ldap_port }}"
+    _bind_dn: "{{ ds389.root_dn }}"
+    _bind_pw: "{{ ds389.root_password }}"
+    _suffix: "{{ ds389.suffix }}"
+
+# --------------------------------------------------------------------------
+# Organisational Units
+# rc=68 = LDAP_ALREADY_EXISTS — treat as success (idempotent)
+# --------------------------------------------------------------------------
+- name: Create ou=people OU
+  ansible.builtin.shell:
+    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: ou=people,{{ _suffix }}
+      objectClass: organizationalUnit
+      ou: people
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  no_log: true
+
+- name: Create ou=groups OU
+  ansible.builtin.shell:
+    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: ou=groups,{{ _suffix }}
+      objectClass: organizationalUnit
+      ou: groups
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  no_log: true
+
+# --------------------------------------------------------------------------
+# LDAP service account (OCP bind user)
+# --------------------------------------------------------------------------
+- name: Create LDAP service account
+  ansible.builtin.shell:
+    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}
+      objectClass: inetOrgPerson
+      objectClass: organizationalPerson
+      objectClass: person
+      objectClass: top
+      uid: {{ ds389_ldap_service_account.username }}
+      cn: {{ ds389_ldap_service_account.cn }}
+      sn: {{ ds389_ldap_service_account.sn }}
+      userPassword: {{ ds389_ldap_service_account.password }}
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  no_log: true
+
+# --------------------------------------------------------------------------
+# OCP test users
+# --------------------------------------------------------------------------
+- name: Create OCP test users
+  ansible.builtin.shell:
+    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: uid={{ item.username }},ou=people,{{ _suffix }}
+      objectClass: inetOrgPerson
+      objectClass: organizationalPerson
+      objectClass: person
+      objectClass: top
+      uid: {{ item.username }}
+      cn: {{ item.cn }}
+      sn: {{ item.sn }}
+      mail: {{ item.username }}@example.com
+      userPassword: {{ item.password }}
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  loop: "{{ ds389_ocp_users }}"
+  no_log: true
+
+# --------------------------------------------------------------------------
+# OCP groups with members.
+# groupOfNames requires at least one member — users must exist first.
+# rc=68 = already exists (idempotent).
+# --------------------------------------------------------------------------
+- name: Create OCP groups with members
+  ansible.builtin.shell:
+    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: cn={{ item }},ou=groups,{{ _suffix }}
+      objectClass: groupOfNames
+      objectClass: top
+      cn: {{ item }}
+      {% for user in ds389_ocp_users if item in (user.groups | default([])) %}
+      member: uid={{ user.username }},ou=people,{{ _suffix }}
+      {% endfor %}
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  loop: "{{ ds389_ocp_groups }}"
+  no_log: true
+
+# --------------------------------------------------------------------------
+# Print ready-to-paste OCP inventory snippets
+# --------------------------------------------------------------------------
+- name: Print OCP inventory snippets
+  ansible.builtin.debug:
+    msg:
+      - "======================================================================"
+      - "389 DS test data created. Add these to your OCP inventory:"
+      - "======================================================================"
+      - ""
+      - "ldap:"
+      - "  name: \"389ds\""
+      - "  url: \"ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}/ou=people,{{ _suffix }}?uid\""
+      - "  bind_dn: \"uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}\""
+      - "  bind_password: \"{{ ds389_ldap_service_account.password }}\""
+      - "  insecure: true"
+      - "  ca_cert: \"\""
+      - "  attributes:"
+      - "    id: [\"dn\"]"
+      - "    email: [\"mail\"]"
+      - "    name: [\"cn\"]"
+      - "    preferred_username: [\"uid\"]"
+      - ""
+      - "rbac_bindings:"
+      - "  - group: \"openshift-admins\""
+      - "    cluster_role: \"cluster-admin\""
+      - "  - group: \"openshift-developers\""
+      - "    cluster_role: \"edit\""
+      - "  - group: \"openshift-viewers\""
+      - "    cluster_role: \"view\""
+      - ""
+      - "groupsync:"
+      - "  schedule: \"0 * * * *\""
+      - "  ldap_url: \"ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}\""
+      - "  bind_dn: \"uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}\""
+      - "  bind_password: \"{{ ds389_ldap_service_account.password }}\""
+      - "  ca_cert: \"\""
+      - "  insecure: true"
+      - "  groups_base_dn: \"ou=groups,{{ _suffix }}\""
+      - "  groups_filter: \"(&(objectClass=groupOfNames)(cn=openshift-*))\""
+      - "  users_base_dn: \"ou=people,{{ _suffix }}\""
+      - "  group_uid_attribute: \"dn\""
+      - "  group_name_attributes: [\"cn\"]"
+      - "  group_membership_attributes: [\"member\"]"
+      - "  user_uid_attribute: \"dn\""
+      - "  user_name_attributes: [\"uid\"]"
+      - "  tolerate_member_not_found: true"
+      - "  tolerate_member_out_of_scope: true"
+      - ""
+      - "======================================================================"
+      - "Test users:"
+      - "{% for u in ds389_ocp_users %}  {{ u.username }} / {{ u.password }}  → {{ u.groups | join(', ') }}{% endfor %}"
+      - "Bind account: {{ ds389_ldap_service_account.username }} / {{ ds389_ldap_service_account.password }}"
+      - "======================================================================"

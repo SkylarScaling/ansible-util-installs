@@ -6,7 +6,7 @@ Ansible playbooks and roles for installing standalone tools and utilities used t
 
 ```
 playbooks/
-  ansible.cfg              # roles_path, callbacks
+  ansible.cfg              # roles_path, callbacks, SSH keep-alive
   install-<utility>.yaml   # one playbook per utility
   group_vars/all.yaml      # shared defaults
 roles/
@@ -23,54 +23,56 @@ roles/
 
 | Playbook | What it installs |
 |---|---|
-| `install-freeipa.yaml` | FreeIPA LDAP/Kerberos server (Podman container) + OCP test users and groups |
+| `install-ldap-server.yaml` | 389 Directory Server (Red Hat LDAP) + OCP test users and groups |
 
 ---
 
-## FreeIPA
+## 389 Directory Server
 
-Installs a FreeIPA server as a Podman container on a target host, then creates an LDAP service account, OCP test groups, and test users. At the end, it prints the exact `ldap:`, `rbac_bindings:`, and `groupsync:` inventory snippets to paste into your OCP automation inventory.
+Installs a 389 DS LDAP server as a Podman container on the jumphost, then creates an LDAP service account, OCP test groups, and test users. At the end it prints the exact `ldap:`, `rbac_bindings:`, and `groupsync:` blocks to paste into your OCP automation inventory.
+
+389 DS is the LDAP engine that FreeIPA uses internally. For OCP LDAP testing, it is the right tool: no Certificate Authority, no Kerberos, no Java — it starts in seconds and runs reliably in containers.
+
+### Why 389 DS instead of FreeIPA
+
+FreeIPA's CA (Dogtag PKI) is Java-based and fails in constrained container environments. For OCP LDAP IDP and GroupSync testing, only the Directory Server component is needed. 389 DS provides exactly that.
 
 ### Prerequisites
 
-- Target host running RHEL 8+, RHEL 9, or Fedora (must have `dnf`)
-- `podman` installed (the role installs it if missing)
-- SSH access from your local machine to the jumphost (key at `~/.ssh/id_ed25519`)
-- At least **2 GB free RAM** on the target host
-- Ports 389, 636, 80, 443, 88, 464 free on the target host
+- Jumphost already provisioned (run `provision-jumphost.yaml` first)
+- SSH access from your local machine to the jumphost
 
 ### Workflow
 
-Run from your **local machine** after the jumphost has been provisioned and configured. The playbook SSHes to the jumphost and installs FreeIPA there — the same SSH pattern used by `provision-jumphost.yaml` Play 2.
-
 ```
-1. ansible-playbook provision-jumphost.yaml -i inventory.yaml   # creates jumphost
-2. ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml  # installs FreeIPA on it
-3. ansible-playbook hub-spoke-disconnected-setup.yaml ...       # deploy OCP (from jumphost)
+1. ansible-playbook provision-jumphost.yaml -i ~/inventories/disconnected-aws-inventory
+2. ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
+3. (add printed snippets to OCP inventory)
+4. ansible-playbook hub-spoke-disconnected-setup.yaml ...  (from jumphost)
 ```
 
 ### Run
 
 ```bash
 cd playbooks
-ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml
+ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
 ```
 
 Install server only (skip test data):
 ```bash
-ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml --tags freeipa
+ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml --skip-tags testdata
 ```
 
 Create/refresh test data only (server already running):
 ```bash
-ansible-playbook install-freeipa.yaml -i inventory-freeipa.yaml --tags testdata
+ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml --tags testdata
 ```
 
 ---
 
 ### Example Inventory
 
-The jumphost public DNS name comes from the output of `provision-jumphost.yaml` — it is printed in the final summary as `Public DNS`.
+The jumphost public DNS name comes from the `provision-jumphost.yaml` summary output.
 
 ```yaml
 all:
@@ -79,11 +81,11 @@ all:
     # Update these two values when you provision a new test environment.
     # Everything else is derived from them.
     # -----------------------------------------------------------------------
-    sandbox_domain: "sandbox2915.opentlc.com"                               # changes each test environment
+    sandbox_domain: "sandbox2915.opentlc.com"                               # changes each environment
     jumphost_public_dns: "ec2-<public-ip>.us-east-2.compute.amazonaws.com"  # from provision-jumphost output
 
   children:
-    freeipa_server:
+    ldap_server:
       hosts:
         jumphost:
           ansible_host: "{{ jumphost_public_dns }}"
@@ -91,71 +93,66 @@ all:
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
           ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-          # FreeIPA server settings — domain/realm derived from sandbox_domain
-          freeipa:
-            hostname: "ipa.{{ sandbox_domain }}"
-            domain: "{{ sandbox_domain }}"
-            realm: "{{ sandbox_domain | upper }}"
-            admin_password: "RedHat123!"
-            directory_manager_password: "RedHat123!"
-            container_name: "freeipa"
-            data_dir: "/opt/freeipa/data"
-            image: "quay.io/freeipa/freeipa-server:rocky-9"
+          # 389 DS server settings
+          ds389:
+            container_name: "389ds"
+            image: "quay.io/389ds/dirsrv"
+            data_dir: "/opt/389ds/data"
+            root_dn: "cn=Directory Manager"
+            root_password: "<dm_password>"
+            suffix: "dc={{ sandbox_domain.split('.') | join(',dc=') }}"
 
-          # LDAP service account — OCP will use this for bind operations
-          freeipa_ldap_service_account:
+          # LDAP service account — OCP uses this for bind operations
+          ds389_ldap_service_account:
             username: "ldap-svc"
-            first_name: "LDAP"
-            last_name: "ServiceAccount"
-            password: "ServicePassword123!"
+            cn: "LDAP Service Account"
+            sn: "ServiceAccount"
+            password: "<service_account_password>"
 
           # OCP groups to create
-          freeipa_ocp_groups:
+          ds389_ocp_groups:
             - openshift-admins
             - openshift-developers
             - openshift-viewers
 
           # OCP test users and their group memberships
-          freeipa_ocp_users:
+          ds389_ocp_users:
             - username: ocp-admin
-              first_name: OCP
-              last_name: Admin
-              password: "Password123!"
+              cn: "OCP Admin"
+              sn: "Admin"
+              password: "<user_password>"
               groups:
                 - openshift-admins
             - username: ocp-dev
-              first_name: OCP
-              last_name: Developer
-              password: "Password123!"
+              cn: "OCP Developer"
+              sn: "Developer"
+              password: "<user_password>"
               groups:
                 - openshift-developers
             - username: ocp-viewer
-              first_name: OCP
-              last_name: Viewer
-              password: "Password123!"
+              cn: "OCP Viewer"
+              sn: "Viewer"
+              password: "<user_password>"
               groups:
                 - openshift-viewers
 ```
-
-> **Note on hostname:** FreeIPA requires its `hostname` to resolve to the host's IP. The role writes a `/etc/hosts` entry automatically using the jumphost's primary interface IP, so the container initialises correctly. For the OCP `ldap.url` and `groupsync.ldap_url`, use the jumphost's **private IP or private DNS name** so cluster nodes can reach it within the VPC — the public DNS name is only reachable from outside AWS. The final summary prints both the LDAP URL and OCP snippet with the correct address.
 
 ---
 
 ### OCP Inventory Snippets (auto-printed at end of run)
 
-After a successful run, the playbook prints the exact blocks to add to your OCP automation inventory. They look like this (values will reflect your actual IPs and domain):
+The playbook prints ready-to-paste blocks for your OCP inventory. They look like this (values will reflect your actual IP and suffix):
 
 ```yaml
-# In your OCP inventory all.vars:
-# (replace the dc= values with your actual base DN printed at end of install run)
+# In your OCP inventory all.vars (use the jumphost's private IP):
 
 ldap:
-  name: "freeipa"
-  url: "ldap://<freeipa-private-ip>:389/cn=users,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com?uid"
-  bind_dn: "uid=ldap-svc,cn=users,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com"
-  bind_password: "ServicePassword123!"
-  insecure: false
-  ca_cert: "{{ lookup('file', '~/freeipa-ca.crt') }}"   # written to ~/freeipa-ca.crt on the control node
+  name: "389ds"
+  url: "ldap://<jumphost-private-ip>:389/ou=people,dc=sandbox2915,dc=opentlc,dc=com?uid"
+  bind_dn: "uid=ldap-svc,ou=people,dc=sandbox2915,dc=opentlc,dc=com"
+  bind_password: "<service_account_password>"
+  insecure: true   # plain LDAP — no CA cert needed for testing
+  ca_cert: ""
   attributes:
     id: ["dn"]
     email: ["mail"]
@@ -172,13 +169,14 @@ rbac_bindings:
 
 groupsync:
   schedule: "0 * * * *"
-  ldap_url: "ldap://<freeipa-host-ip>:389"
-  bind_dn: "uid=ldap-svc,cn=users,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com"
-  bind_password: "ServicePassword123!"
-  ca_cert: "{{ lookup('file', '~/freeipa-ca.crt') }}"
-  groups_base_dn: "cn=groups,cn=accounts,dc=sandbox2915,dc=opentlc,dc=com"
-  groups_filter: "(&(objectClass=ipausergroup)(cn=openshift-*))"
-  users_base_dn: "cn=users,cn=accounts,dc=example,dc=com"
+  ldap_url: "ldap://<jumphost-private-ip>:389"
+  bind_dn: "uid=ldap-svc,ou=people,dc=sandbox2915,dc=opentlc,dc=com"
+  bind_password: "<service_account_password>"
+  ca_cert: ""
+  insecure: true
+  groups_base_dn: "ou=groups,dc=sandbox2915,dc=opentlc,dc=com"
+  groups_filter: "(&(objectClass=groupOfNames)(cn=openshift-*))"
+  users_base_dn: "ou=people,dc=sandbox2915,dc=opentlc,dc=com"
   group_uid_attribute: "dn"
   group_name_attributes: ["cn"]
   group_membership_attributes: ["member"]
@@ -188,34 +186,23 @@ groupsync:
   tolerate_member_out_of_scope: true
 ```
 
-The FreeIPA CA certificate is saved to `~/freeipa-ca.crt` on your control node so it can be read directly by the `lookup('file', ...)` calls above.
-
 ---
 
 ### Inventory Variable Reference
 
-**`freeipa` dict (per-host):**
+**`ds389` dict (per-host):**
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `freeipa.hostname` | Yes | — | FQDN for the IPA server — must resolve to the host IP |
-| `freeipa.domain` | Yes | — | DNS domain (e.g. `sandbox2915.opentlc.com`) |
-| `freeipa.realm` | Yes | — | Kerberos realm — uppercase domain by convention |
-| `freeipa.admin_password` | Yes | — | IPA admin user password |
-| `freeipa.directory_manager_password` | Yes | — | LDAP Directory Manager password |
-| `freeipa.container_name` | No | `freeipa` | Podman container name |
-| `freeipa.data_dir` | No | `/opt/freeipa/data` | Host path for persistent IPA data |
-| `freeipa.image` | No | `quay.io/freeipa/freeipa-server:fedora-41` | Container image to use |
+| `ds389.container_name` | No | `389ds` | Podman container name |
+| `ds389.image` | No | `quay.io/389ds/dirsrv` | Container image |
+| `ds389.data_dir` | No | `/opt/389ds/data` | Host path for persistent data |
+| `ds389.root_dn` | No | `cn=Directory Manager` | Directory Manager bind DN |
+| `ds389.root_password` | Yes | — | Directory Manager password |
+| `ds389.suffix` | Yes | — | LDAP suffix (e.g. `dc=example,dc=com`) |
 
-**`freeipa_ldap_service_account` dict:**
+**`ds389_ldap_service_account` dict:** `username`, `cn`, `sn`, `password` — the bind account OCP uses.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `username` | Yes | `ldap-svc` | IPA username for the bind account |
-| `first_name` | No | `LDAP` | IPA user first name |
-| `last_name` | No | `ServiceAccount` | IPA user last name |
-| `password` | Yes | — | Bind account password (use ansible-vault) |
+**`ds389_ocp_groups` list:** Group names to create. Any group matching `cn=openshift-*` is included by the default GroupSync filter.
 
-**`freeipa_ocp_groups` list:** Group names to create in IPA. Any group prefixed with `openshift-` is automatically included by the default `groups_filter` in the GroupSync config.
-
-**`freeipa_ocp_users` list:** Each entry has `username`, `first_name`, `last_name`, `password`, and `groups` (list of group names to add the user to).
+**`ds389_ocp_users` list:** Each entry has `username`, `cn`, `sn`, `password`, and `groups` (list of group names).

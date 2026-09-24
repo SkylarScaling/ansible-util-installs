@@ -1,0 +1,12 @@
+---
+ds389:
+  container_name: "389ds"
+  image: "quay.io/389ds/dirsrv"
+  data_dir: "/opt/389ds/data"
+  root_dn: "cn=Directory Manager"
+  root_password: "ChangeMe123!"
+  suffix: "dc=example,dc=com"
+
+ds389_ldap_port: 389    # host port mapped to container's 3389
+ds389_ldaps_port: 636   # host port mapped to container's 3636
+ds389_init_timeout: 120
