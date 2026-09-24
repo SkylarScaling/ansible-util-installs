@@ -141,6 +141,32 @@
         delay: 5
 
 # --------------------------------------------------------------------------
+# Add the base suffix entry with retries.
+# DS_SUFFIX_NAME creates the backend but not the base entry. The backend
+# may also still be warming up for a few seconds after the port opens.
+# Retry until success (rc=0) or already-exists (rc=68).
+# --------------------------------------------------------------------------
+- name: Add base suffix entry (retries until backend is fully ready)
+  ansible.builtin.shell:
+    cmd: >
+      ldapadd -x
+      -H ldap://localhost:{{ ds389_ldap_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
+    stdin: |
+      dn: {{ ds389.suffix }}
+      objectClass: top
+      objectClass: domain
+      dc: {{ ds389.suffix.split(',')[0].split('=')[1] }}
+  register: _base_entry
+  until: _base_entry.rc in [0, 68]
+  retries: 24
+  delay: 5
+  changed_when: _base_entry.rc == 0
+  failed_when: _base_entry.rc not in [0, 68]
+  no_log: true
+
+# --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
 # --------------------------------------------------------------------------
 - name: Check if systemd unit already exists

@@ -31,23 +31,6 @@
   changed_when: false
 
 # --------------------------------------------------------------------------
-# Base suffix entry.
-# DS_SUFFIX_NAME creates the backend database but NOT the base entry.
-# The base entry must be added explicitly before any children can be added.
-# --------------------------------------------------------------------------
-- name: Create base suffix entry
-  ansible.builtin.shell:
-    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
-    stdin: |
-      dn: {{ _suffix }}
-      objectClass: top
-      objectClass: domain
-      dc: {{ _suffix.split(',')[0].split('=')[1] }}
-  register: _result
-  changed_when: _result.rc == 0
-  failed_when: _result.rc not in [0, 68]
-
-# --------------------------------------------------------------------------
 # Organisational Units
 # rc=68 = LDAP_ALREADY_EXISTS — treat as success (idempotent)
 # --------------------------------------------------------------------------
