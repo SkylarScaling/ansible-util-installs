@@ -29,7 +29,7 @@
   until: _pull_result.rc == 0
 
 # --------------------------------------------------------------------------
-# Determine current state
+# Determine current container state
 # --------------------------------------------------------------------------
 - name: Check if 389 DS container exists
   ansible.builtin.command: podman inspect {{ ds389.container_name }}
@@ -44,19 +44,12 @@
       {{ (_container_inspect.stdout | from_json)[0].State.Status
          if _container_inspect.rc == 0 else 'missing' }}
 
-# --------------------------------------------------------------------------
-# Start / create container.
-# The image auto-initialises on first run when /data is empty using the
-# DS_DM_PASSWORD and DS_SUFFIX_NAME environment variables. On subsequent
-# runs it detects existing data and just starts the LDAP service.
-# No separate dscreate phase required.
-# --------------------------------------------------------------------------
 - name: Start existing container if stopped
   ansible.builtin.command: podman start {{ ds389.container_name }}
   when: _container_exists and _container_status != 'running'
   changed_when: true
 
-- name: Run 389 DS container (first time or after full cleanup)
+- name: Run 389 DS container (first time or after cleanup)
   ansible.builtin.command: >
     podman run -d
     --name {{ ds389.container_name }}
@@ -70,22 +63,91 @@
   changed_when: true
   no_log: true
 
-# --------------------------------------------------------------------------
-# Wait for LDAP port.
-# Auto-init takes ~30 seconds on first run; on subsequent runs 389 DS
-# starts in a few seconds. wait_for on a port does fast TCP probes.
-# --------------------------------------------------------------------------
 - name: Wait for 389 DS LDAP port to be available
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: "{{ ds389_ldap_port }}"
     timeout: "{{ ds389_init_timeout }}"
     delay: 5
-    msg: "389 DS did not start within {{ ds389_init_timeout }}s — check: podman logs {{ ds389.container_name }}"
+    msg: "389 DS did not start — check: podman logs {{ ds389.container_name }}"
+
+# --------------------------------------------------------------------------
+# Verify the suffix backend was actually created.
+# DS_SUFFIX_NAME is only applied when /data is empty at first run. If the
+# data dir had partial state from a previous failed attempt, auto-init is
+# skipped and no backend is created. We detect this and recover.
+# --------------------------------------------------------------------------
+- name: Check if suffix backend is configured
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H ldap://localhost:{{ ds389_ldap_port }}
+    -D '{{ ds389.root_dn }}'
+    -w '{{ ds389.root_password }}'
+    -b 'cn=config'
+    '(nsslapd-suffix={{ ds389.suffix }})'
+    nsslapd-suffix
+    2>&1
+  register: _backend_check
+  changed_when: false
+  no_log: true
+
+- name: Set suffix backend exists fact
+  ansible.builtin.set_fact:
+    _suffix_backend_exists: "{{ ds389.suffix in _backend_check.stdout }}"
+
+- name: Full recovery — suffix backend missing (stale data dir from prior run)
+  when: not _suffix_backend_exists
+  block:
+    - name: Stop 389 DS systemd service
+      ansible.builtin.systemd:
+        name: "container-{{ ds389.container_name }}.service"
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Remove container
+      ansible.builtin.command: podman rm -f {{ ds389.container_name }}
+      changed_when: true
+
+    - name: Wipe data directory
+      ansible.builtin.file:
+        path: "{{ ds389.data_dir }}"
+        state: absent
+
+    - name: Recreate data directory
+      ansible.builtin.file:
+        path: "{{ ds389.data_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Run fresh container with correct suffix
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ ds389.container_name }}
+        -p {{ ds389_ldap_port }}:3389
+        -p {{ ds389_ldaps_port }}:3636
+        -v {{ ds389.data_dir }}:/data:Z
+        -e DS_DM_PASSWORD={{ ds389.root_password }}
+        -e DS_SUFFIX_NAME={{ ds389.suffix }}
+        {{ ds389.image }}
+      changed_when: true
+      no_log: true
+
+    - name: Wait for 389 DS LDAP port after recovery
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ ds389_ldap_port }}"
+        timeout: "{{ ds389_init_timeout }}"
+        delay: 5
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
 # --------------------------------------------------------------------------
+- name: Check if systemd unit already exists
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/container-{{ ds389.container_name }}.service"
+  register: _unit_stat
+
 - name: Generate systemd unit for 389 DS container
   ansible.builtin.command: >
     podman generate systemd
@@ -95,14 +157,14 @@
   args:
     chdir: /etc/systemd/system
   changed_when: true
-  when: not _container_exists
+  when: not _unit_stat.stat.exists
 
 - name: Enable 389 DS container service
   ansible.builtin.systemd:
     daemon_reload: true
     name: "container-{{ ds389.container_name }}.service"
     enabled: true
-  when: not _container_exists
+  when: not _unit_stat.stat.exists
 
 # --------------------------------------------------------------------------
 # Summary
