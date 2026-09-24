@@ -74,9 +74,29 @@
   failed_when: false
   when: _container_exists
 
+- name: Set initialization flag
+  ansible.builtin.set_fact:
+    _needs_init: >-
+      {{ not _container_exists or
+         (_ipa_initialized is defined and _ipa_initialized.rc != 0) }}
+
 # --------------------------------------------------------------------------
-# Automatic recovery from incomplete initialization
+# Automatic recovery from incomplete initialization.
+# Stop the systemd service FIRST to release ports before removing the
+# container — otherwise systemd immediately reclaims them and podman run
+# fails silently.
 # --------------------------------------------------------------------------
+- name: Stop FreeIPA systemd service before recovery (releases ports)
+  ansible.builtin.systemd:
+    name: "container-{{ freeipa.container_name }}.service"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when:
+    - _container_exists
+    - _ipa_initialized is defined
+    - _ipa_initialized.rc != 0
+
 - name: Remove incomplete FreeIPA container
   ansible.builtin.command: podman rm -f {{ freeipa.container_name }}
   when:
@@ -104,29 +124,25 @@
     - _ipa_initialized is defined
     - _ipa_initialized.rc != 0
 
-- name: Set initialization flag
-  ansible.builtin.set_fact:
-    _needs_init: >-
-      {{ not _container_exists or
-         (_ipa_initialized is defined and _ipa_initialized.rc != 0) }}
-
 # --------------------------------------------------------------------------
-# Initialize (only when needed)
+# Initialize (only when needed — new or recovered from bad state)
 #
-# DNS setup (--setup-dns) is intentionally omitted. On EC2, port 53 is
-# held by the AWS resolver and the BIND install always fails. FreeIPA
-# works fine as a pure LDAP/Kerberos server without DNS.
-# --skip-conncheck suppresses connectivity pre-flight checks that
-# fail in container/NAT environments.
+# --privileged gives the container the capabilities it needs (SYS_RESOURCE
+# for RLIMIT, NET_ADMIN for loopback config) without having to enumerate
+# them per-host. Acceptable for a test LDAP environment.
+# --log-driver=k8s-file ensures 'podman logs' always works regardless of
+# the host's default log driver (which may be journald on RHEL systems).
+# DNS setup is omitted — port 53 conflicts with the AWS resolver and
+# FreeIPA works as a pure LDAP/Kerberos server without DNS.
 # --------------------------------------------------------------------------
 - name: Initialize FreeIPA server container (takes 5-10 minutes)
   ansible.builtin.command: >
     podman run -d
     --name {{ freeipa.container_name }}
     --hostname {{ freeipa.hostname }}
+    --privileged
+    --log-driver=k8s-file
     {% for port in freeipa_ports %}-p {{ port }} {% endfor %}
-    {% for cap in freeipa_run_caps %}--cap-add {{ cap }} {% endfor %}
-    {% for sysctl in freeipa_sysctls %}--sysctl {{ sysctl }} {% endfor %}
     -v {{ freeipa.data_dir }}:/data:Z
     {{ freeipa.image }}
     ipa-server-install
@@ -144,9 +160,8 @@
 
 # --------------------------------------------------------------------------
 # Wait for full initialization.
-# Each iteration checks the container status first. If the container
-# exited (install failed), we capture the last 50 log lines and fail
-# immediately rather than retrying for another 15 minutes.
+# Checks container status each iteration — if the container exits, capture
+# the last 50 log lines and fail immediately (rc=2) rather than retrying.
 # --------------------------------------------------------------------------
 - name: Wait for FreeIPA to fully initialize
   ansible.builtin.shell: |

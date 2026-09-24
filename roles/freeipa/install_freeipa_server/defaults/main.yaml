@@ -18,16 +18,5 @@ freeipa_ports:
   - "88:88"      # Kerberos
   - "464:464"    # kpasswd
 
-# Linux capabilities required by the FreeIPA entrypoint:
-#   SYS_RESOURCE — set RLIMIT_CORE and other process resource limits
-#   NET_ADMIN    — configure loopback and network interfaces
-freeipa_run_caps:
-  - SYS_RESOURCE
-  - NET_ADMIN
-
-# FreeIPA requires IPv6 enabled on the loopback interface
-freeipa_sysctls:
-  - "net.ipv6.conf.all.disable_ipv6=0"
-
 # How long to wait for initialization (seconds, ~5-10 min for first run)
 freeipa_init_timeout: 900
