@@ -107,7 +107,6 @@
     dscreate from-file /data/instance.inf
   when: _needs_init
   changed_when: true
-  no_log: true
 
 # --------------------------------------------------------------------------
 # Phase 2: start the daemon.
