@@ -29,110 +29,51 @@
   until: _pull_result.rc == 0
 
 # --------------------------------------------------------------------------
-# Determine current state.
-# dse.ldif is written by dscreate and is the canonical indicator that
-# instance initialisation completed successfully.
+# Determine current state
 # --------------------------------------------------------------------------
-- name: Check if 389 DS instance already exists
-  ansible.builtin.stat:
-    path: "{{ ds389.data_dir }}/config/dse.ldif"
-  register: _dse_stat
-
 - name: Check if 389 DS container exists
   ansible.builtin.command: podman inspect {{ ds389.container_name }}
   register: _container_inspect
   changed_when: false
   failed_when: false
 
-- name: Set state facts
+- name: Set container state facts
   ansible.builtin.set_fact:
-    _instance_exists: "{{ _dse_stat.stat.exists | default(false) }}"
     _container_exists: "{{ _container_inspect.rc == 0 }}"
     _container_status: >-
       {{ (_container_inspect.stdout | from_json)[0].State.Status
          if _container_inspect.rc == 0 else 'missing' }}
 
-- name: Set initialization flag
-  ansible.builtin.set_fact:
-    _needs_init: "{{ not _instance_exists }}"
-
 # --------------------------------------------------------------------------
-# Recovery: if a container exists but instance was never completed,
-# stop the systemd service first so it doesn't reclaim ports.
+# Start / create container.
+# The image auto-initialises on first run when /data is empty using the
+# DS_DM_PASSWORD and DS_SUFFIX_NAME environment variables. On subsequent
+# runs it detects existing data and just starts the LDAP service.
+# No separate dscreate phase required.
 # --------------------------------------------------------------------------
-- name: Stop 389 DS systemd service before recovery
-  ansible.builtin.systemd:
-    name: "container-{{ ds389.container_name }}.service"
-    state: stopped
-    enabled: false
-  failed_when: false
-  when: _needs_init and _container_exists
-
-- name: Remove stale container
-  ansible.builtin.command: podman rm -f {{ ds389.container_name }}
-  when: _needs_init and _container_exists
+- name: Start existing container if stopped
+  ansible.builtin.command: podman start {{ ds389.container_name }}
+  when: _container_exists and _container_status != 'running'
   changed_when: true
 
-- name: Wipe partial data directory
-  ansible.builtin.file:
-    path: "{{ ds389.data_dir }}"
-    state: absent
-  when: _needs_init and _container_exists
-
-- name: Recreate data directory
-  ansible.builtin.file:
-    path: "{{ ds389.data_dir }}"
-    state: directory
-    mode: '0755'
-  when: _needs_init and _container_exists
-
-# --------------------------------------------------------------------------
-# Phase 1: create the 389 DS instance (runs dscreate, then exits).
-# The container writes the full instance config to {{ ds389.data_dir }}.
-# --------------------------------------------------------------------------
-- name: Write instance configuration file
-  ansible.builtin.template:
-    src: instance.inf.j2
-    dest: "{{ ds389.data_dir }}/instance.inf"
-    mode: '0600'
-  when: _needs_init
-  no_log: true
-
-- name: Initialise 389 DS instance (dscreate — takes ~30 seconds)
-  ansible.builtin.command: >
-    podman run --rm
-    --name {{ ds389.container_name }}-init
-    -v {{ ds389.data_dir }}:/data:Z
-    {{ ds389.image }}
-    dscreate from-file /data/instance.inf
-  when: _needs_init
-  changed_when: true
-
-# --------------------------------------------------------------------------
-# Phase 2: start the daemon.
-# The container detects that /data already has a configured instance and
-# starts the 389 DS service without re-running dscreate.
-# Port mapping: host:389 → container:3389, host:636 → container:3636
-# --------------------------------------------------------------------------
-- name: Start 389 DS daemon
+- name: Run 389 DS container (first time or after full cleanup)
   ansible.builtin.command: >
     podman run -d
     --name {{ ds389.container_name }}
     -p {{ ds389_ldap_port }}:3389
     -p {{ ds389_ldaps_port }}:3636
     -v {{ ds389.data_dir }}:/data:Z
+    -e DS_DM_PASSWORD={{ ds389.root_password }}
+    -e DS_SUFFIX_NAME={{ ds389.suffix }}
     {{ ds389.image }}
-  when: _needs_init or (not _container_exists)
+  when: not _container_exists
   changed_when: true
-
-- name: Start existing container if stopped
-  ansible.builtin.command: podman start {{ ds389.container_name }}
-  when: not _needs_init and _container_exists and _container_status != 'running'
-  changed_when: true
+  no_log: true
 
 # --------------------------------------------------------------------------
-# Wait for LDAP port. 389 DS starts in a few seconds — a short port probe
-# is enough. wait_for on a port does fast TCP probes; no SSH timeout risk.
+# Wait for LDAP port.
+# Auto-init takes ~30 seconds on first run; on subsequent runs 389 DS
+# starts in a few seconds. wait_for on a port does fast TCP probes.
 # --------------------------------------------------------------------------
 - name: Wait for 389 DS LDAP port to be available
   ansible.builtin.wait_for:
@@ -140,7 +81,7 @@
     port: "{{ ds389_ldap_port }}"
     timeout: "{{ ds389_init_timeout }}"
     delay: 5
-    msg: "389 DS did not start within {{ ds389_init_timeout }}s — run 'podman logs {{ ds389.container_name }}' for details"
+    msg: "389 DS did not start within {{ ds389_init_timeout }}s — check: podman logs {{ ds389.container_name }}"
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
@@ -154,14 +95,14 @@
   args:
     chdir: /etc/systemd/system
   changed_when: true
-  when: _needs_init or (not _container_exists)
+  when: not _container_exists
 
 - name: Enable 389 DS container service
   ansible.builtin.systemd:
     daemon_reload: true
     name: "container-{{ ds389.container_name }}.service"
     enabled: true
-  when: _needs_init or (not _container_exists)
+  when: not _container_exists
 
 # --------------------------------------------------------------------------
 # Summary
