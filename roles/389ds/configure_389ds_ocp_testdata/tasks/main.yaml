@@ -18,17 +18,35 @@
 # operations must be deferred until the base entry is queryable.
 # Anonymous search on the base suffix is safe — no credentials in output.
 # --------------------------------------------------------------------------
-- name: Wait for 389 DS suffix backend to be ready
+- name: Wait for 389 DS to be ready (check root DSE)
   ansible.builtin.shell: >
     ldapsearch -x
     -H {{ _ldap_url }}
-    -b '{{ _suffix }}'
-    -s base dn 2>&1
-  register: _suffix_ready
-  until: _suffix_ready.rc == 0
+    -b ''
+    -s base namingContexts 2>&1
+  register: _ds_ready
+  until: _ds_ready.rc == 0
   retries: 24
   delay: 10
   changed_when: false
+
+# --------------------------------------------------------------------------
+# Base suffix entry.
+# DS_SUFFIX_NAME creates the backend database but NOT the base entry.
+# The base entry must be added explicitly before any children can be added.
+# --------------------------------------------------------------------------
+- name: Create base suffix entry
+  ansible.builtin.shell:
+    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: {{ _suffix }}
+      objectClass: top
+      objectClass: domain
+      dc: {{ _suffix.split(',')[0].split('=')[1] }}
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  no_log: true
 
 # --------------------------------------------------------------------------
 # Organisational Units
