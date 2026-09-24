@@ -154,13 +154,18 @@
 - name: Wait for FreeIPA initialization (watching host filesystem)
   when: _needs_init
   block:
+    # Poll with stat + retry rather than wait_for. wait_for holds a single
+    # SSH session open for the full timeout (up to 15 min), which EC2 drops.
+    # stat + retry creates a fresh SSH connection every 30 s so there is
+    # never an idle session long enough to time out.
     - name: Wait for CA cert to appear in data volume
-      ansible.builtin.wait_for:
+      ansible.builtin.stat:
         path: "{{ freeipa.data_dir }}/etc/ipa/ca.crt"
-        state: present
-        timeout: "{{ freeipa_init_timeout }}"
-        sleep: 15
-        msg: "Timed out waiting for FreeIPA CA cert at {{ freeipa.data_dir }}/etc/ipa/ca.crt"
+      register: _ca_check
+      until: _ca_check.stat.exists | default(false)
+      retries: "{{ (freeipa_init_timeout / 30) | int }}"
+      delay: 30
+      changed_when: false
 
   rescue:
     - name: Collect container diagnostics
