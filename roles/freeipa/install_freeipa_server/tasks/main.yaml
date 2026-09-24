@@ -125,6 +125,8 @@
     --name {{ freeipa.container_name }}
     --hostname {{ freeipa.hostname }}
     {% for port in freeipa_ports %}-p {{ port }} {% endfor %}
+    {% for cap in freeipa_run_caps %}--cap-add {{ cap }} {% endfor %}
+    {% for sysctl in freeipa_sysctls %}--sysctl {{ sysctl }} {% endfor %}
     -v {{ freeipa.data_dir }}:/data:Z
     {{ freeipa.image }}
     ipa-server-install
