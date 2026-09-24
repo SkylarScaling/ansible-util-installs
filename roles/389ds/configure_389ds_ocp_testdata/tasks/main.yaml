@@ -13,6 +13,24 @@
     _suffix: "{{ ds389.suffix }}"
 
 # --------------------------------------------------------------------------
+# Wait for 389 DS to finish auto-initializing the suffix backend.
+# The LDAP port opens before the suffix entry is created, so ldapadd
+# operations must be deferred until the base entry is queryable.
+# Anonymous search on the base suffix is safe — no credentials in output.
+# --------------------------------------------------------------------------
+- name: Wait for 389 DS suffix backend to be ready
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H {{ _ldap_url }}
+    -b '{{ _suffix }}'
+    -s base dn 2>&1
+  register: _suffix_ready
+  until: _suffix_ready.rc == 0
+  retries: 24
+  delay: 10
+  changed_when: false
+
+# --------------------------------------------------------------------------
 # Organisational Units
 # rc=68 = LDAP_ALREADY_EXISTS — treat as success (idempotent)
 # --------------------------------------------------------------------------
