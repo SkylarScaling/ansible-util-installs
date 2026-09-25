@@ -146,17 +146,24 @@
 # Create the backend database and base suffix entry explicitly.
 # --create-suffix adds the dc=... base entry immediately so callers
 # never need to add it themselves. Idempotent: already-exists is OK.
-- name: Create backend and base suffix entry via dsconf
+- name: Create backend and base suffix entry via dsconf (LDAPI socket)
   ansible.builtin.shell: |
-    podman exec {{ ds389.container_name }} \
-      dsconf \
-      -D '{{ ds389.root_dn }}' \
-      -w '{{ ds389.root_password }}' \
-      ldap://localhost:3389 \
-      backend create \
-      --suffix '{{ ds389.suffix }}' \
+    podman exec {{ ds389.container_name }} bash -c '
+    # Auto-detect instance name from /etc/dirsrv/slapd-<name> directory.
+    # dsconf <name> connects via the local LDAPI socket — no TCP, no port.
+    # Running as root inside the container provides SASL EXTERNAL auth.
+    INSTANCE=$(ls /etc/dirsrv/ 2>/dev/null | grep "^slapd-" | head -1 | sed "s/slapd-//")
+    if [ -z "$INSTANCE" ]; then
+      echo "ERROR: no slapd instance found in /etc/dirsrv/" >&2
+      ls -la /etc/dirsrv/ >&2 || true
+      exit 1
+    fi
+    echo "Detected instance: $INSTANCE"
+    dsconf "$INSTANCE" backend create \
+      --suffix "{{ ds389.suffix }}" \
       --be-name userroot \
       --create-suffix 2>&1
+    '
   register: _backend_create
   changed_when: _backend_create.rc == 0
   failed_when: >
