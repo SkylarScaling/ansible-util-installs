@@ -1,0 +1,203 @@
+---
+- name: Set LDAP connection fact
+  ansible.builtin.set_fact:
+    _ldap_url: "ldap://localhost:{{ ds389_ldap_port }}"
+    _suffix: "{{ ds389.suffix }}"
+
+# --------------------------------------------------------------------------
+# Container check
+# --------------------------------------------------------------------------
+- name: "[Verify] 389 DS container is running"
+  ansible.builtin.command: >
+    podman inspect {{ ds389.container_name }}
+    --format '{{ "{{" }}.State.Status{{ "}}" }}'
+  register: _container_status
+  changed_when: false
+  failed_when: false
+
+- name: "[Verify] Assert container is running"
+  ansible.builtin.assert:
+    that: _container_status.stdout == 'running'
+    fail_msg: "Container '{{ ds389.container_name }}' is not running (status: {{ _container_status.stdout | default('not found') }})"
+    success_msg: "Container '{{ ds389.container_name }}' is running"
+
+# --------------------------------------------------------------------------
+# LDAP connectivity
+# --------------------------------------------------------------------------
+- name: "[Verify] Anonymous bind and root DSE query"
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H {{ _ldap_url }}
+    -b '' -s base namingContexts 2>&1
+  register: _anon_bind
+  changed_when: false
+  failed_when: false
+
+- name: "[Verify] Assert anonymous LDAP bind succeeds"
+  ansible.builtin.assert:
+    that: _anon_bind.rc == 0
+    fail_msg: "Anonymous LDAP bind failed (rc={{ _anon_bind.rc }}): {{ _anon_bind.stderr }}"
+    success_msg: "Anonymous LDAP bind OK"
+
+- name: "[Verify] Authenticated bind as Directory Manager"
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H {{ _ldap_url }}
+    -D '{{ ds389.root_dn }}'
+    -w '{{ ds389.root_password }}'
+    -b '{{ _suffix }}'
+    -s base dn 2>&1
+  register: _auth_bind
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "[Verify] Assert authenticated bind succeeds"
+  ansible.builtin.assert:
+    that: _auth_bind.rc == 0
+    fail_msg: "Authenticated LDAP bind failed (rc={{ _auth_bind.rc }}) — check root_dn and root_password"
+    success_msg: "Authenticated LDAP bind OK — suffix '{{ _suffix }}' is accessible"
+
+- name: "[Verify] Service account bind"
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H {{ _ldap_url }}
+    -D 'uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}'
+    -w '{{ ds389_ldap_service_account.password }}'
+    -b 'ou=people,{{ _suffix }}'
+    -s base dn 2>&1
+  register: _svc_bind
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "[Verify] Assert service account bind succeeds"
+  ansible.builtin.assert:
+    that: _svc_bind.rc == 0
+    fail_msg: "Service account bind failed (rc={{ _svc_bind.rc }}) — OCP will not be able to search LDAP"
+    success_msg: "Service account '{{ ds389_ldap_service_account.username }}' bind OK"
+
+- name: "[Verify] Search for OCP groups"
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H {{ _ldap_url }}
+    -D '{{ ds389.root_dn }}'
+    -w '{{ ds389.root_password }}'
+    -b 'ou=groups,{{ _suffix }}'
+    '(&(objectClass=groupOfNames)(cn=openshift-*))'
+    cn 2>&1
+  register: _groups_search
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "[Verify] Assert OCP groups are present"
+  ansible.builtin.assert:
+    that: "'openshift-' in _groups_search.stdout"
+    fail_msg: "No openshift-* groups found — run the testdata play first"
+    success_msg: "OCP groups found in directory"
+
+# --------------------------------------------------------------------------
+# EC2 security group check — verify port 389 is open to the VPC
+# --------------------------------------------------------------------------
+- name: "[Verify] Get EC2 instance ID from metadata"
+  ansible.builtin.uri:
+    url: "http://169.254.169.254/latest/meta-data/instance-id"
+    return_content: true
+  register: _instance_id
+  failed_when: false
+
+- name: "[Verify] Get VPC CIDR block"
+  ansible.builtin.shell: >
+    aws ec2 describe-instances
+    --instance-ids {{ _instance_id.content | trim }}
+    --region {{ aws.aws_region }}
+    --query 'Reservations[0].Instances[0].VpcId'
+    --output text
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _vpc_id
+  changed_when: false
+  failed_when: false
+  when: _instance_id.status == 200
+
+- name: "[Verify] Get VPC CIDR"
+  ansible.builtin.shell: >
+    aws ec2 describe-vpcs
+    --vpc-ids {{ _vpc_id.stdout | trim }}
+    --region {{ aws.aws_region }}
+    --query 'Vpcs[0].CidrBlock'
+    --output text
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _vpc_cidr
+  changed_when: false
+  failed_when: false
+  when: _vpc_id.stdout is defined and _vpc_id.stdout != ''
+
+- name: "[Verify] Get security groups attached to instance"
+  ansible.builtin.shell: >
+    aws ec2 describe-instances
+    --instance-ids {{ _instance_id.content | trim }}
+    --region {{ aws.aws_region }}
+    --query 'Reservations[0].Instances[0].SecurityGroups[*].GroupId'
+    --output text
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _sg_ids
+  changed_when: false
+  failed_when: false
+  when: _instance_id.status == 200
+
+- name: "[Verify] Check if port 389 is open in security groups"
+  ansible.builtin.shell: >
+    aws ec2 describe-security-groups
+    --group-ids {{ _sg_ids.stdout | trim | replace('\t', ' ') }}
+    --region {{ aws.aws_region }}
+    --query "SecurityGroups[*].IpPermissions[?FromPort<=\`{{ ldap_check_port }}\` && ToPort>=\`{{ ldap_check_port }}\`]"
+    --output json
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _sg_rules
+  changed_when: false
+  failed_when: false
+  when: _sg_ids.stdout is defined and _sg_ids.stdout != ''
+
+- name: "[Verify] Set port_389_open fact"
+  ansible.builtin.set_fact:
+    _port_open: >-
+      {{ (_sg_rules.stdout | from_json | flatten | length) > 0 }}
+  when: _sg_rules.stdout is defined
+
+# --------------------------------------------------------------------------
+# Summary
+# --------------------------------------------------------------------------
+- name: Print verification summary
+  ansible.builtin.debug:
+    msg:
+      - "======================================================================"
+      - "389 DS Verification Results"
+      - "======================================================================"
+      - "Container:        {{ 'RUNNING' if _container_status.stdout == 'running' else 'NOT RUNNING' }}"
+      - "LDAP (anon):      {{ 'OK' if _anon_bind.rc == 0 else 'FAIL' }}"
+      - "LDAP (auth):      {{ 'OK' if _auth_bind.rc == 0 else 'FAIL' }}"
+      - "Service account:  {{ 'OK' if _svc_bind.rc == 0 else 'FAIL' }}"
+      - "OCP groups:       {{ 'FOUND' if 'openshift-' in _groups_search.stdout else 'MISSING' }}"
+      - ""
+      - "EC2 / VPC:"
+      - "  Instance:       {{ _instance_id.content | default('unknown') | trim }}"
+      - "  VPC:            {{ _vpc_id.stdout | default('unknown') | trim }}"
+      - "  VPC CIDR:       {{ _vpc_cidr.stdout | default('unknown') | trim }}"
+      - "  Port {{ ldap_check_port }} open:  {{ _port_open | default('unknown') }}"
+      - ""
+      - "{% if not (_port_open | default(true) | bool) %}"
+      - "  ACTION REQUIRED: Add an inbound rule to the jumphost security group:"
+      - "    Type: Custom TCP  Port: {{ ldap_check_port }}  Source: {{ _vpc_cidr.stdout | default('<vpc-cidr>') | trim }}"
+      - "{% else %}"
+      - "  Security group allows port {{ ldap_check_port }} — cluster nodes can reach LDAP."
+      - "{% endif %}"
+      - "======================================================================"

@@ -1,0 +1,20 @@
+---
+ds389:
+  container_name: "389ds"
+  root_dn: "cn=Directory Manager"
+  root_password: "ChangeMe123!"
+  suffix: "dc=example,dc=com"
+
+ds389_ldap_port: 389
+
+ds389_ldap_service_account:
+  username: "ldap-svc"
+  password: "ChangeMe123!"
+
+aws:
+  aws_region: "us-east-2"
+  aws_access_key_id: ""
+  aws_secret_access_key: ""
+
+# VPC port to check in security group rules
+ldap_check_port: 389

@@ -21,9 +21,10 @@ roles/
 
 ## Utilities
 
-| Playbook | What it installs |
+| Playbook | What it does |
 |---|---|
-| `install-ldap-server.yaml` | 389 Directory Server (Red Hat LDAP) + OCP test users and groups |
+| `install-ldap-server.yaml` | Installs 389 Directory Server + OCP test users and groups |
+| `verify-ldap-server.yaml` | Verifies LDAP is reachable, service account works, and EC2 security group allows port 389 from the VPC |
 
 ---
 
@@ -68,6 +69,11 @@ Create/refresh test data only (server already running):
 ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml --tags testdata
 ```
 
+Verify LDAP is reachable and EC2 security group allows port 389:
+```bash
+ansible-playbook verify-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
+```
+
 ---
 
 ### Example Inventory
@@ -92,6 +98,12 @@ all:
           ansible_user: "ec2-user"
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
           ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+          # AWS credentials — used by verify-ldap-server.yaml to check EC2 security group rules
+          aws:
+            aws_region: "us-east-2"
+            aws_access_key_id: "<aws_access_key_id>"
+            aws_secret_access_key: "<aws_secret_access_key>"
 
           # 389 DS server settings
           ds389:
