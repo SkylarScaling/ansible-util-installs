@@ -164,7 +164,6 @@
   delay: 5
   changed_when: _base_entry.rc == 0
   failed_when: _base_entry.rc not in [0, 68]
-  no_log: true
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
