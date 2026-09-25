@@ -170,7 +170,6 @@
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
   when: not _suffix_ready
-  no_log: true
 
 - name: Add mapping tree entry to cn=config
   ansible.builtin.shell:
@@ -191,7 +190,6 @@
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
   when: not _suffix_ready
-  no_log: true
 
 - name: Restart 389 DS container to initialise backend database files
   ansible.builtin.command: podman restart {{ ds389.container_name }}
@@ -222,7 +220,6 @@
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
   when: not _suffix_ready
-  no_log: true
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
