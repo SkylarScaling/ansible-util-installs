@@ -146,30 +146,83 @@
 # Create the backend database and base suffix entry explicitly.
 # --create-suffix adds the dc=... base entry immediately so callers
 # never need to add it themselves. Idempotent: already-exists is OK.
-- name: Create backend and base suffix entry via dsconf (LDAPI socket)
-  ansible.builtin.shell: |
-    podman exec {{ ds389.container_name }} bash -c '
-    # Auto-detect instance name from /etc/dirsrv/slapd-<name> directory.
-    # dsconf <name> connects via the local LDAPI socket — no TCP, no port.
-    # Running as root inside the container provides SASL EXTERNAL auth.
-    INSTANCE=$(ls /etc/dirsrv/ 2>/dev/null | grep "^slapd-" | head -1 | sed "s/slapd-//")
-    if [ -z "$INSTANCE" ]; then
-      echo "ERROR: no slapd instance found in /etc/dirsrv/" >&2
-      ls -la /etc/dirsrv/ >&2 || true
-      exit 1
-    fi
-    echo "Detected instance: $INSTANCE"
-    dsconf "$INSTANCE" backend create \
-      --suffix "{{ ds389.suffix }}" \
-      --be-name userroot \
-      --create-suffix 2>&1
-    '
-  register: _backend_create
-  changed_when: _backend_create.rc == 0
-  failed_when: >
-    _backend_create.rc != 0 and
-    'already exists' not in (_backend_create.stdout + _backend_create.stderr) | lower
+# Add the backend instance config to cn=config via the host-side TCP connection
+# (the only reliable LDAP path we have). The backend + mapping tree entries
+# tell 389 DS about the new suffix. A container restart is then required to
+# initialise the database files on disk.
+- name: Add backend instance to cn=config
+  ansible.builtin.shell:
+    cmd: >
+      ldapadd -x
+      -H ldap://localhost:{{ ds389_ldap_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
+    stdin: |
+      dn: cn=userroot,cn=ldbm database,cn=plugins,cn=config
+      objectClass: extensibleObject
+      objectClass: nsBackendInstance
+      cn: userroot
+      nsslapd-suffix: {{ ds389.suffix }}
+      nsslapd-cachesize: -1
+      nsslapd-cachememsize: 10485760
+      nsslapd-readonly: off
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
   when: not _suffix_ready
+  no_log: true
+
+- name: Add mapping tree entry to cn=config
+  ansible.builtin.shell:
+    cmd: >
+      ldapadd -x
+      -H ldap://localhost:{{ ds389_ldap_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
+    stdin: |
+      dn: cn="{{ ds389.suffix }}",cn=mapping tree,cn=config
+      objectClass: top
+      objectClass: extensibleObject
+      objectClass: nsMappingTree
+      cn: {{ ds389.suffix }}
+      nsslapd-state: backend
+      nsslapd-backend: userroot
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  when: not _suffix_ready
+  no_log: true
+
+- name: Restart 389 DS container to initialise backend database files
+  ansible.builtin.command: podman restart {{ ds389.container_name }}
+  changed_when: true
+  when: not _suffix_ready
+
+- name: Wait for 389 DS LDAP port after restart
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ ds389_ldap_port }}"
+    timeout: "{{ ds389_init_timeout }}"
+    delay: 5
+  when: not _suffix_ready
+
+- name: Add base suffix entry
+  ansible.builtin.shell:
+    cmd: >
+      ldapadd -x
+      -H ldap://localhost:{{ ds389_ldap_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
+    stdin: |
+      dn: {{ ds389.suffix }}
+      objectClass: top
+      objectClass: domain
+      dc: {{ ds389.suffix.split(',')[0].split('=')[1] }}
+  register: _result
+  changed_when: _result.rc == 0
+  failed_when: _result.rc not in [0, 68]
+  when: not _suffix_ready
+  no_log: true
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
