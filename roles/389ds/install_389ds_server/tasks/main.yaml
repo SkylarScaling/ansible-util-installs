@@ -29,7 +29,7 @@
   until: _pull_result.rc == 0
 
 # --------------------------------------------------------------------------
-# Determine current container state
+# Container lifecycle
 # --------------------------------------------------------------------------
 - name: Check if 389 DS container exists
   ansible.builtin.command: podman inspect {{ ds389.container_name }}
@@ -57,7 +57,6 @@
     -p {{ ds389_ldaps_port }}:3636
     -v {{ ds389.data_dir }}:/data:Z
     -e DS_DM_PASSWORD={{ ds389.root_password }}
-    -e DS_SUFFIX_NAME={{ ds389.suffix }}
     {{ ds389.image }}
   when: not _container_exists
   changed_when: true
@@ -72,98 +71,97 @@
     msg: "389 DS did not start — check: podman logs {{ ds389.container_name }}"
 
 # --------------------------------------------------------------------------
-# Verify the suffix backend was actually created.
-# DS_SUFFIX_NAME is only applied when /data is empty at first run. If the
-# data dir had partial state from a previous failed attempt, auto-init is
-# skipped and no backend is created. We detect this and recover.
+# Verify the suffix base entry exists.
+# rc=0  → suffix entry present, nothing to do.
+# rc=32 → No such object — backend missing or base entry not yet added.
+# Any other rc → connection/auth problem (fail loudly).
 # --------------------------------------------------------------------------
-- name: Check if suffix backend is configured
+- name: Check if suffix base entry exists
   ansible.builtin.shell: >
     ldapsearch -x
     -H ldap://localhost:{{ ds389_ldap_port }}
-    -D '{{ ds389.root_dn }}'
-    -w '{{ ds389.root_password }}'
-    -b 'cn=config'
-    '(nsslapd-suffix={{ ds389.suffix }})'
-    nsslapd-suffix
-    2>&1
-  register: _backend_check
+    -b '{{ ds389.suffix }}'
+    -s base dn 2>&1
+  register: _suffix_check
   changed_when: false
+  failed_when: _suffix_check.rc not in [0, 32]
+
+- name: Set suffix_ready fact
+  ansible.builtin.set_fact:
+    _suffix_ready: "{{ _suffix_check.rc == 0 }}"
+
+# --------------------------------------------------------------------------
+# If suffix is missing: stop/remove stale container, wipe data, start fresh.
+# Then create the backend AND base entry explicitly with dsconf so we are
+# not dependent on DS_SUFFIX_NAME auto-init (which is skipped if /data has
+# any prior content).
+# --------------------------------------------------------------------------
+- name: Recovery — stop systemd service before cleanup
+  ansible.builtin.systemd:
+    name: "container-{{ ds389.container_name }}.service"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not _suffix_ready and _container_exists
+
+- name: Recovery — remove stale container
+  ansible.builtin.command: podman rm -f {{ ds389.container_name }}
+  when: not _suffix_ready and _container_exists
+  changed_when: true
+
+- name: Recovery — wipe data directory
+  ansible.builtin.file:
+    path: "{{ ds389.data_dir }}"
+    state: absent
+  when: not _suffix_ready
+
+- name: Recovery — recreate data directory
+  ansible.builtin.file:
+    path: "{{ ds389.data_dir }}"
+    state: directory
+    mode: '0755'
+  when: not _suffix_ready
+
+- name: Recovery — start fresh 389 DS container
+  ansible.builtin.command: >
+    podman run -d
+    --name {{ ds389.container_name }}
+    -p {{ ds389_ldap_port }}:3389
+    -p {{ ds389_ldaps_port }}:3636
+    -v {{ ds389.data_dir }}:/data:Z
+    -e DS_DM_PASSWORD={{ ds389.root_password }}
+    {{ ds389.image }}
+  when: not _suffix_ready
+  changed_when: true
   no_log: true
 
-- name: Set suffix backend exists fact
-  ansible.builtin.set_fact:
-    _suffix_backend_exists: "{{ ds389.suffix in _backend_check.stdout }}"
+- name: Recovery — wait for LDAP port after container restart
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ ds389_ldap_port }}"
+    timeout: "{{ ds389_init_timeout }}"
+    delay: 5
+  when: not _suffix_ready
 
-- name: Full recovery — suffix backend missing (stale data dir from prior run)
-  when: not _suffix_backend_exists
-  block:
-    - name: Stop 389 DS systemd service
-      ansible.builtin.systemd:
-        name: "container-{{ ds389.container_name }}.service"
-        state: stopped
-        enabled: false
-      failed_when: false
-
-    - name: Remove container
-      ansible.builtin.command: podman rm -f {{ ds389.container_name }}
-      changed_when: true
-
-    - name: Wipe data directory
-      ansible.builtin.file:
-        path: "{{ ds389.data_dir }}"
-        state: absent
-
-    - name: Recreate data directory
-      ansible.builtin.file:
-        path: "{{ ds389.data_dir }}"
-        state: directory
-        mode: '0755'
-
-    - name: Run fresh container with correct suffix
-      ansible.builtin.command: >
-        podman run -d
-        --name {{ ds389.container_name }}
-        -p {{ ds389_ldap_port }}:3389
-        -p {{ ds389_ldaps_port }}:3636
-        -v {{ ds389.data_dir }}:/data:Z
-        -e DS_DM_PASSWORD={{ ds389.root_password }}
-        -e DS_SUFFIX_NAME={{ ds389.suffix }}
-        {{ ds389.image }}
-      changed_when: true
-      no_log: true
-
-    - name: Wait for 389 DS LDAP port after recovery
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ ds389_ldap_port }}"
-        timeout: "{{ ds389_init_timeout }}"
-        delay: 5
-
-# --------------------------------------------------------------------------
-# Add the base suffix entry with retries.
-# DS_SUFFIX_NAME creates the backend but not the base entry. The backend
-# may also still be warming up for a few seconds after the port opens.
-# Retry until success (rc=0) or already-exists (rc=68).
-# --------------------------------------------------------------------------
-- name: Add base suffix entry (retries until backend is fully ready)
-  ansible.builtin.shell:
-    cmd: >
-      ldapadd -x
-      -H ldap://localhost:{{ ds389_ldap_port }}
-      -D '{{ ds389.root_dn }}'
-      -w '{{ ds389.root_password }}'
-    stdin: |
-      dn: {{ ds389.suffix }}
-      objectClass: top
-      objectClass: domain
-      dc: {{ ds389.suffix.split(',')[0].split('=')[1] }}
-  register: _base_entry
-  until: _base_entry.rc in [0, 68]
-  retries: 24
-  delay: 5
-  changed_when: _base_entry.rc == 0
-  failed_when: _base_entry.rc not in [0, 68]
+# Create the backend database and base suffix entry explicitly.
+# --create-suffix adds the dc=... base entry immediately so callers
+# never need to add it themselves. Idempotent: already-exists is OK.
+- name: Create backend and base suffix entry via dsconf
+  ansible.builtin.shell: |
+    podman exec {{ ds389.container_name }} \
+      dsconf -j ldap://localhost:3389 \
+      --root-dn '{{ ds389.root_dn }}' \
+      --root-password '{{ ds389.root_password }}' \
+      backend create \
+      --suffix '{{ ds389.suffix }}' \
+      --be-name userroot \
+      --create-suffix 2>&1
+  register: _backend_create
+  changed_when: "'Successfully' in _backend_create.stdout"
+  failed_when: >
+    _backend_create.rc != 0 and
+    'already exists' not in (_backend_create.stdout + _backend_create.stderr) | lower
+  when: not _suffix_ready
 
 # --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
