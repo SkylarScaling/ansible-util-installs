@@ -32,3 +32,35 @@
         (ds389_ocp_groups | default([]) | length > 0) or
         (ds389_ocp_users | default([]) | length > 0) or
         (ds389_ldap_service_account is defined)
+
+# ==============================================================================
+# SUMMARY: Restate SSH and next-step info
+# ==============================================================================
+- name: Post-install Summary
+  hosts: ldap_server
+  gather_facts: true
+  become: false
+  tags: ['always']
+  tasks:
+    - name: Print SSH connection and next steps
+      ansible.builtin.debug:
+        msg:
+          - "=================================================================="
+          - "LDAP Setup Complete"
+          - "=================================================================="
+          - ""
+          - "Jumphost SSH:"
+          - "  ssh -i {{ ansible_ssh_private_key_file }} {{ ansible_user }}@{{ ansible_host }}"
+          - ""
+          - "Update disconnected-aws-inventory with:"
+          - "  jumphost_private_ip: \"{{ ansible_default_ipv4.address }}\""
+          - ""
+          - "Copy inventory to jumphost:"
+          - "  scp -i {{ ansible_ssh_private_key_file }} \\"
+          - "    ~/inventories/disconnected-aws-inventory \\"
+          - "    {{ ansible_user }}@{{ ansible_host }}:~/71638776-openshift-automation/playbooks/"
+          - ""
+          - "Then on the jumphost:"
+          - "  cd ~/71638776-openshift-automation/playbooks"
+          - "  ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory"
+          - "=================================================================="
