@@ -125,56 +125,29 @@
   no_log: true
 
 # --------------------------------------------------------------------------
-# Print ready-to-paste OCP inventory snippets
+# Print only what needs to be updated in the OCP inventory.
+# The ldap/rbac_bindings/groupsync blocks are pre-populated with Jinja2
+# templates driven by base_domain. The only value that changes per
+# environment and must be filled in manually is jumphost_private_ip.
 # --------------------------------------------------------------------------
-- name: Print OCP inventory snippets
+- name: Print OCP inventory update
   ansible.builtin.debug:
     msg:
       - "======================================================================"
-      - "389 DS test data created. Add these to your OCP inventory:"
+      - "389 DS ready. One value to add/update in disconnected-aws-inventory:"
       - "======================================================================"
       - ""
-      - "ldap:"
-      - "  name: \"389ds\""
-      - "  url: \"ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}/ou=people,{{ _suffix }}?uid\""
-      - "  bind_dn: \"uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}\""
-      - "  bind_password: \"{{ ds389_ldap_service_account.password }}\""
-      - "  insecure: true"
-      - "  ca_cert: \"\""
-      - "  attributes:"
-      - "    id: [\"dn\"]"
-      - "    email: [\"mail\"]"
-      - "    name: [\"cn\"]"
-      - "    preferred_username: [\"uid\"]"
+      - "  jumphost_private_ip: \"{{ ansible_default_ipv4.address }}\""
       - ""
-      - "rbac_bindings:"
-      - "  - group: \"openshift-admins\""
-      - "    cluster_role: \"cluster-admin\""
-      - "  - group: \"openshift-developers\""
-      - "    cluster_role: \"edit\""
-      - "  - group: \"openshift-viewers\""
-      - "    cluster_role: \"view\""
+      - "The ldap, rbac_bindings, and groupsync blocks are already in the"
+      - "inventory and derive their values from base_domain and jumphost_private_ip."
       - ""
-      - "groupsync:"
-      - "  schedule: \"0 * * * *\""
-      - "  ldap_url: \"ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}\""
-      - "  bind_dn: \"uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}\""
-      - "  bind_password: \"{{ ds389_ldap_service_account.password }}\""
-      - "  ca_cert: \"\""
-      - "  insecure: true"
-      - "  groups_base_dn: \"ou=groups,{{ _suffix }}\""
-      - "  groups_filter: \"(&(objectClass=groupOfNames)(cn=openshift-*))\""
-      - "  users_base_dn: \"ou=people,{{ _suffix }}\""
-      - "  group_uid_attribute: \"dn\""
-      - "  group_name_attributes: [\"cn\"]"
-      - "  group_membership_attributes: [\"member\"]"
-      - "  user_uid_attribute: \"dn\""
-      - "  user_name_attributes: [\"uid\"]"
-      - "  tolerate_member_not_found: true"
-      - "  tolerate_member_out_of_scope: true"
+      - "Resolved URLs for this environment:"
+      - "  LDAP:   ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}/ou=people,{{ _suffix }}?uid"
+      - "  Groups: ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}"
+      - "  Suffix: {{ _suffix }}"
       - ""
-      - "======================================================================"
-      - "Test users:"
-      - "{% for u in ds389_ocp_users %}  {{ u.username }} / {{ u.password }}  → {{ u.groups | join(', ') }}{% endfor %}"
+      - "Test users (all passwords: {{ ds389_ocp_users[0].password }}):"
+      - "{% for u in ds389_ocp_users %}  {{ u.username }}  → {{ u.groups | join(', ') }}{% endfor %}"
       - "Bind account: {{ ds389_ldap_service_account.username }} / {{ ds389_ldap_service_account.password }}"
       - "======================================================================"

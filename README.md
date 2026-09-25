@@ -139,19 +139,31 @@ all:
 
 ---
 
-### OCP Inventory Snippets (auto-printed at end of run)
+### OCP Inventory Update (printed at end of run)
 
-The playbook prints ready-to-paste blocks for your OCP inventory. They look like this (values will reflect your actual IP and suffix):
+The playbook prints the **one value** that needs to be set per environment. Everything else is pre-populated in the OCP inventory using Jinja2 templates driven by `base_domain`.
+
+```
+jumphost_private_ip: "10.0.0.x"   ← add/update this in disconnected-aws-inventory
+```
+
+**Pre-populate these blocks once in your OCP inventory** — they never change between environments because `base_domain` and `jumphost_private_ip` drive all the derived values:
 
 ```yaml
-# In your OCP inventory all.vars (use the jumphost's private IP):
+# In disconnected-aws-inventory all.vars:
+
+jumphost_private_ip: ""   # ← fill in after running install-ldap-server.yaml
+
+ntp_servers:
+  - 169.254.169.123
+  - 0.rhel.pool.ntp.org
 
 ldap:
   name: "389ds"
-  url: "ldap://<jumphost-private-ip>:389/ou=people,dc=sandbox2915,dc=opentlc,dc=com?uid"
-  bind_dn: "uid=ldap-svc,ou=people,dc=sandbox2915,dc=opentlc,dc=com"
+  url: "ldap://{{ jumphost_private_ip }}:389/ou=people,dc={{ base_domain.split('.') | join(',dc=') }}?uid"
+  bind_dn: "uid=ldap-svc,ou=people,dc={{ base_domain.split('.') | join(',dc=') }}"
   bind_password: "<service_account_password>"
-  insecure: true   # plain LDAP — no CA cert needed for testing
+  insecure: true
   ca_cert: ""
   attributes:
     id: ["dn"]
@@ -169,14 +181,14 @@ rbac_bindings:
 
 groupsync:
   schedule: "0 * * * *"
-  ldap_url: "ldap://<jumphost-private-ip>:389"
-  bind_dn: "uid=ldap-svc,ou=people,dc=sandbox2915,dc=opentlc,dc=com"
+  ldap_url: "ldap://{{ jumphost_private_ip }}:389"
+  bind_dn: "uid=ldap-svc,ou=people,dc={{ base_domain.split('.') | join(',dc=') }}"
   bind_password: "<service_account_password>"
   ca_cert: ""
   insecure: true
-  groups_base_dn: "ou=groups,dc=sandbox2915,dc=opentlc,dc=com"
+  groups_base_dn: "ou=groups,dc={{ base_domain.split('.') | join(',dc=') }}"
   groups_filter: "(&(objectClass=groupOfNames)(cn=openshift-*))"
-  users_base_dn: "ou=people,dc=sandbox2915,dc=opentlc,dc=com"
+  users_base_dn: "ou=people,dc={{ base_domain.split('.') | join(',dc=') }}"
   group_uid_attribute: "dn"
   group_name_attributes: ["cn"]
   group_membership_attributes: ["member"]
@@ -185,6 +197,8 @@ groupsync:
   tolerate_member_not_found: true
   tolerate_member_out_of_scope: true
 ```
+
+> **Note:** The OCP disconnected inventory uses `base_domain` (not `sandbox_domain`). The templates above match that convention.
 
 ---
 
