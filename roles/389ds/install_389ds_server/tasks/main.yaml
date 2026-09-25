@@ -62,13 +62,16 @@
   changed_when: true
   no_log: true
 
-- name: Wait for 389 DS LDAP port to be available
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ ds389_ldap_port }}"
-    timeout: "{{ ds389_init_timeout }}"
-    delay: 5
-    msg: "389 DS did not start — check: podman logs {{ ds389.container_name }}"
+- name: Wait for 389 DS to accept LDAP operations (root DSE query)
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H ldap://localhost:{{ ds389_ldap_port }}
+    -b '' -s base namingContexts 2>&1
+  register: _ldap_ready
+  until: _ldap_ready.rc == 0
+  retries: "{{ (ds389_init_timeout / 5) | int }}"
+  delay: 5
+  changed_when: false
 
 # --------------------------------------------------------------------------
 # Verify the suffix base entry exists.
@@ -135,12 +138,16 @@
   changed_when: true
   no_log: true
 
-- name: Recovery — wait for LDAP port after container restart
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ ds389_ldap_port }}"
-    timeout: "{{ ds389_init_timeout }}"
-    delay: 5
+- name: Recovery — wait for 389 DS to accept LDAP operations after restart
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H ldap://localhost:{{ ds389_ldap_port }}
+    -b '' -s base namingContexts 2>&1
+  register: _recovery_ldap_ready
+  until: _recovery_ldap_ready.rc == 0
+  retries: "{{ (ds389_init_timeout / 5) | int }}"
+  delay: 5
+  changed_when: false
   when: not _suffix_ready
 
 # Create the backend database and base suffix entry explicitly.
@@ -196,12 +203,16 @@
   changed_when: true
   when: not _suffix_ready
 
-- name: Wait for 389 DS LDAP port after restart
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ ds389_ldap_port }}"
-    timeout: "{{ ds389_init_timeout }}"
-    delay: 5
+- name: Wait for 389 DS to accept LDAP operations after backend restart
+  ansible.builtin.shell: >
+    ldapsearch -x
+    -H ldap://localhost:{{ ds389_ldap_port }}
+    -b '' -s base namingContexts 2>&1
+  register: _post_restart_ready
+  until: _post_restart_ready.rc == 0
+  retries: "{{ (ds389_init_timeout / 5) | int }}"
+  delay: 5
+  changed_when: false
   when: not _suffix_ready
 
 - name: Add base suffix entry
