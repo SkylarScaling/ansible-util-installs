@@ -69,13 +69,10 @@ Create/refresh test data only (server already running):
 ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml --tags testdata
 ```
 
-Verify LDAP is reachable and EC2 security group allows port 389:
+Verify LDAP is reachable:
 ```bash
-ansible-playbook verify-ldap-server.yaml \
-  -i ~/inventories/ldap-inventory.yaml \
-  -i ~/inventories/disconnected-aws-inventory
+ansible-playbook verify-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
 ```
-The second inventory provides the AWS credentials needed for the security group check.
 
 ---
 
@@ -101,12 +98,6 @@ all:
           ansible_user: "ec2-user"
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
           ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-
-          # AWS credentials — used by verify-ldap-server.yaml to check EC2 security group rules
-          aws:
-            aws_region: "us-east-2"
-            aws_access_key_id: "<aws_access_key_id>"
-            aws_secret_access_key: "<aws_secret_access_key>"
 
           # 389 DS server settings
           ds389:

@@ -134,31 +134,6 @@
     _sg_ids_val:      "{{ _metadata_raw.stdout | regex_search('SG_IDS=(.+)', '\\1') | first | default('') }}"
   when: _metadata_raw.rc == 0
 
-- name: "[Verify] Check if port 389 is open in security groups"
-  ansible.builtin.shell: >
-    aws ec2 describe-security-groups
-    --group-ids {{ _sg_ids_val | trim }}
-    --region {{ aws.aws_region }}
-    --query "SecurityGroups[*].IpPermissions[?FromPort<=\`{{ ldap_check_port }}\` && ToPort>=\`{{ ldap_check_port }}\`]"
-    --output json
-  environment: >-
-    {{
-      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
-       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
-      if (aws.aws_access_key_id | default('')) != ''
-      else {}
-    }}
-  register: _sg_rules
-  changed_when: false
-  failed_when: false
-  when: (_sg_ids_val | default('')) != ''
-
-- name: "[Verify] Set port_389_open fact"
-  ansible.builtin.set_fact:
-    _port_open: >-
-      {{ (_sg_rules.stdout | from_json | flatten | length) > 0 }}
-  when: _sg_rules.stdout is defined and _sg_rules.stdout != ''
-
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
@@ -174,16 +149,8 @@
       - "Service account:  {{ 'OK' if _svc_bind.rc == 0 else 'FAIL' }}"
       - "OCP groups:       {{ 'FOUND' if 'openshift-' in _groups_search.stdout else 'MISSING' }}"
       - ""
-      - "EC2 / VPC:"
-      - "  Instance:       {{ _instance_id_val | default('unknown') }}"
-      - "  VPC:            {{ _vpc_id_val | default('unknown') }}"
-      - "  VPC CIDR:       {{ _vpc_cidr_val | default('unknown') }}"
-      - "  Security Groups: {{ _sg_ids_val | default('unknown') | trim }}"
-      - "  Port {{ ldap_check_port }} open:  {{ _port_open | default('not checked') }}"
-      - ""
-      - "{{ 'ACTION REQUIRED: Add inbound rule — Custom TCP / Port ' ~ ldap_check_port ~ ' / Source: ' ~ (_vpc_cidr_val | default('<vpc-cidr>'))
-           if _port_open is defined and not _port_open | bool
-           else ('Security group allows port ' ~ ldap_check_port ~ ' — OK.')
-           if _port_open is defined and _port_open | bool
-           else 'Port ' ~ ldap_check_port ~ ' check inconclusive (ec2:DescribeSecurityGroups may not be permitted). Verify manually: check SG ' ~ (_sg_ids_val | default('') | trim) ~ ' allows Custom TCP port ' ~ ldap_check_port ~ ' from ' ~ (_vpc_cidr_val | default('10.0.0.0/16')) ~ '.' }}"
+      - "EC2:"
+      - "  Instance:  {{ _instance_id_val | default('unknown') }}"
+      - "  VPC:       {{ _vpc_id_val | default('unknown') }}"
+      - "  VPC CIDR:  {{ _vpc_cidr_val | default('unknown') }}"
       - "======================================================================"

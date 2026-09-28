@@ -3,11 +3,8 @@
 # Verify 389 DS is running, LDAP is accessible, and the EC2 security group
 # allows port 389 from the VPC so cluster nodes can reach the LDAP server.
 #
-# Run from the playbooks/ directory (pass both inventories so AWS credentials
-# from disconnected-aws-inventory are available for the security group check):
-#   ansible-playbook verify-ldap-server.yaml \
-#     -i ~/inventories/ldap-inventory.yaml \
-#     -i ~/inventories/disconnected-aws-inventory
+# Run from the playbooks/ directory:
+#   ansible-playbook verify-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
 # ==============================================================================
 - name: Verify 389 DS LDAP Server and EC2 Connectivity
   hosts: ldap_server
