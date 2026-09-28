@@ -194,10 +194,7 @@
       - "  VPC CIDR:       {{ _vpc_cidr.stdout | default('unknown') | trim }}"
       - "  Port {{ ldap_check_port }} open:  {{ _port_open | default('unknown') }}"
       - ""
-      - "{% if not (_port_open | default(true) | bool) %}"
-      - "  ACTION REQUIRED: Add an inbound rule to the jumphost security group:"
-      - "    Type: Custom TCP  Port: {{ ldap_check_port }}  Source: {{ _vpc_cidr.stdout | default('<vpc-cidr>') | trim }}"
-      - "{% else %}"
-      - "  Security group allows port {{ ldap_check_port }} — cluster nodes can reach LDAP."
-      - "{% endif %}"
+      - "{{ 'ACTION REQUIRED: Add inbound rule — Custom TCP / Port ' ~ ldap_check_port ~ ' / Source: ' ~ (_vpc_cidr.stdout | default('<vpc-cidr>') | trim)
+           if not (_port_open | default(true) | bool)
+           else 'Security group allows port ' ~ ldap_check_port ~ ' — cluster nodes can reach LDAP.' }}"
       - "======================================================================"
