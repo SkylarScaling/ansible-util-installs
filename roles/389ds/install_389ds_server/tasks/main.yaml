@@ -9,9 +9,11 @@
 # --------------------------------------------------------------------------
 # Host preparation
 # --------------------------------------------------------------------------
-- name: Ensure podman is installed
+- name: Ensure required packages are installed
   ansible.builtin.dnf:
-    name: podman
+    name:
+      - podman
+      - openldap-clients
     state: present
 
 - name: Create 389 DS data directory
