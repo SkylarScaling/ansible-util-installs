@@ -114,9 +114,13 @@
     --region {{ aws.aws_region }}
     --query 'Reservations[0].Instances[0].VpcId'
     --output text
-  environment:
-    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  environment: >-
+    {{
+      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
+       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
+      if (aws.aws_access_key_id | default('')) != ''
+      else {}
+    }}
   register: _vpc_id
   changed_when: false
   failed_when: false
@@ -129,9 +133,13 @@
     --region {{ aws.aws_region }}
     --query 'Vpcs[0].CidrBlock'
     --output text
-  environment:
-    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  environment: >-
+    {{
+      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
+       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
+      if (aws.aws_access_key_id | default('')) != ''
+      else {}
+    }}
   register: _vpc_cidr
   changed_when: false
   failed_when: false
@@ -144,9 +152,13 @@
     --region {{ aws.aws_region }}
     --query 'Reservations[0].Instances[0].SecurityGroups[*].GroupId'
     --output text
-  environment:
-    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  environment: >-
+    {{
+      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
+       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
+      if (aws.aws_access_key_id | default('')) != ''
+      else {}
+    }}
   register: _sg_ids
   changed_when: false
   failed_when: false
@@ -159,9 +171,13 @@
     --region {{ aws.aws_region }}
     --query "SecurityGroups[*].IpPermissions[?FromPort<=\`{{ ldap_check_port }}\` && ToPort>=\`{{ ldap_check_port }}\`]"
     --output json
-  environment:
-    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  environment: >-
+    {{
+      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
+       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
+      if (aws.aws_access_key_id | default('')) != ''
+      else {}
+    }}
   register: _sg_rules
   changed_when: false
   failed_when: false

@@ -71,8 +71,11 @@ ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml -
 
 Verify LDAP is reachable and EC2 security group allows port 389:
 ```bash
-ansible-playbook verify-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
+ansible-playbook verify-ldap-server.yaml \
+  -i ~/inventories/ldap-inventory.yaml \
+  -i ~/inventories/disconnected-aws-inventory
 ```
+The second inventory provides the AWS credentials needed for the security group check.
 
 ---
 
