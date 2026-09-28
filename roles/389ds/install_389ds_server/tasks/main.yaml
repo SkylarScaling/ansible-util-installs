@@ -235,6 +235,74 @@
   when: not _suffix_ready
 
 # --------------------------------------------------------------------------
+# Open port 389 for LDAP access from within the VPC.
+# Cluster nodes must reach the LDAP server — two layers:
+#   1. OS firewall (firewalld) — if running on the jumphost
+#   2. EC2 security group — inbound rule from the VPC CIDR
+# Both are idempotent: duplicate rules are silently ignored.
+# --------------------------------------------------------------------------
+- name: Check if firewalld is available
+  ansible.builtin.command: which firewall-cmd
+  register: _fw_available
+  changed_when: false
+  failed_when: false
+
+- name: Open port {{ ds389_ldap_port }} in firewalld
+  ansible.builtin.command: >
+    firewall-cmd --add-port={{ ds389_ldap_port }}/tcp --permanent
+  become: true
+  register: _fw_rule
+  changed_when: "'already' not in _fw_rule.stdout"
+  failed_when: _fw_rule.rc != 0 and 'NOT_RUNNING' not in _fw_rule.stderr
+  when: _fw_available.rc == 0
+
+- name: Reload firewalld to apply rule
+  ansible.builtin.command: firewall-cmd --reload
+  become: true
+  when: _fw_available.rc == 0 and _fw_rule is changed
+  changed_when: true
+  failed_when: false
+
+- name: Get VPC CIDR and security group IDs from EC2 metadata
+  ansible.builtin.shell: |
+    set -e
+    TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
+      -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)
+    HDR=""
+    [ -n "$TOKEN" ] && HDR="-H X-aws-ec2-metadata-token:$TOKEN"
+    BASE="http://169.254.169.254/latest/meta-data"
+    MAC=$(curl -sf $HDR $BASE/network/interfaces/macs/ | head -1 | tr -d '/')
+    echo "VPC_CIDR=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/vpc-ipv4-cidr-block)"
+    echo "SG_IDS=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/security-group-ids | tr '\n' ' ')"
+  register: _ec2_meta
+  changed_when: false
+  failed_when: false
+
+- name: Parse VPC metadata facts
+  ansible.builtin.set_fact:
+    _ldap_vpc_cidr: "{{ _ec2_meta.stdout | regex_search('VPC_CIDR=(.+)', '\\1') | first | default('') }}"
+    _ldap_sg_ids:   "{{ (_ec2_meta.stdout | regex_search('SG_IDS=(.+)', '\\1') | first | default('')).split() }}"
+  when: _ec2_meta.rc == 0
+
+- name: Add port {{ ds389_ldap_port }} inbound rule to EC2 security groups
+  ansible.builtin.shell: >
+    aws ec2 authorize-security-group-ingress
+    --group-id {{ item }}
+    --protocol tcp
+    --port {{ ds389_ldap_port }}
+    --cidr {{ _ldap_vpc_cidr }}
+    --region {{ aws.aws_region }} 2>&1
+  register: _sg_result
+  changed_when: _sg_result.rc == 0
+  failed_when: >
+    _sg_result.rc != 0 and
+    'InvalidPermission.Duplicate' not in (_sg_result.stdout + _sg_result.stderr)
+  loop: "{{ _ldap_sg_ids | default([]) }}"
+  when:
+    - (_ldap_vpc_cidr | default('')) != ''
+    - (_ldap_sg_ids | default([]) | length) > 0
+
+# --------------------------------------------------------------------------
 # Systemd unit for persistence across reboots
 # --------------------------------------------------------------------------
 - name: Check if systemd unit already exists
