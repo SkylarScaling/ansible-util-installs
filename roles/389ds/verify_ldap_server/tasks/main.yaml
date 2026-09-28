@@ -178,9 +178,12 @@
       - "  Instance:       {{ _instance_id_val | default('unknown') }}"
       - "  VPC:            {{ _vpc_id_val | default('unknown') }}"
       - "  VPC CIDR:       {{ _vpc_cidr_val | default('unknown') }}"
-      - "  Port {{ ldap_check_port }} open:  {{ _port_open | default('unknown') }}"
+      - "  Security Groups: {{ _sg_ids_val | default('unknown') | trim }}"
+      - "  Port {{ ldap_check_port }} open:  {{ _port_open | default('not checked') }}"
       - ""
       - "{{ 'ACTION REQUIRED: Add inbound rule — Custom TCP / Port ' ~ ldap_check_port ~ ' / Source: ' ~ (_vpc_cidr_val | default('<vpc-cidr>'))
-           if not (_port_open | default(true) | bool)
-           else 'Security group allows port ' ~ ldap_check_port ~ ' — cluster nodes can reach LDAP.' }}"
+           if _port_open is defined and not _port_open | bool
+           else ('Security group allows port ' ~ ldap_check_port ~ ' — OK.')
+           if _port_open is defined and _port_open | bool
+           else 'Port ' ~ ldap_check_port ~ ' check inconclusive (ec2:DescribeSecurityGroups may not be permitted). Verify manually: check SG ' ~ (_sg_ids_val | default('') | trim) ~ ' allows Custom TCP port ' ~ ldap_check_port ~ ' from ' ~ (_vpc_cidr_val | default('10.0.0.0/16')) ~ '.' }}"
       - "======================================================================"
