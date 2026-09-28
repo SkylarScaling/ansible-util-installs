@@ -100,74 +100,44 @@
 # --------------------------------------------------------------------------
 # EC2 security group check — verify port 389 is open to the VPC
 # --------------------------------------------------------------------------
-- name: "[Verify] Get EC2 instance ID from metadata"
-  ansible.builtin.uri:
-    url: "http://169.254.169.254/latest/meta-data/instance-id"
-    return_content: true
-  register: _instance_id
-  failed_when: false
-
-- name: "[Verify] Get VPC CIDR block"
-  ansible.builtin.shell: >
-    aws ec2 describe-instances
-    --instance-ids {{ _instance_id.content | trim }}
-    --region {{ aws.aws_region }}
-    --query 'Reservations[0].Instances[0].VpcId'
-    --output text
-  environment: >-
-    {{
-      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
-       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
-      if (aws.aws_access_key_id | default('')) != ''
-      else {}
-    }}
-  register: _vpc_id
+# --------------------------------------------------------------------------
+# Get VPC ID, CIDR, and SG IDs from the EC2 metadata service — no AWS
+# credentials needed. A single shell gets the primary MAC then queries
+# the per-MAC metadata paths. Supports both IMDSv1 and IMDSv2.
+# --------------------------------------------------------------------------
+- name: "[Verify] Get VPC, CIDR, SG IDs and instance ID from EC2 metadata"
+  ansible.builtin.shell: |
+    set -e
+    TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
+      -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)
+    HDR=""
+    [ -n "$TOKEN" ] && HDR="-H X-aws-ec2-metadata-token:$TOKEN"
+    BASE="http://169.254.169.254/latest/meta-data"
+    INSTANCE_ID=$(curl -sf $HDR $BASE/instance-id)
+    MAC=$(curl -sf $HDR $BASE/network/interfaces/macs/ | head -1 | tr -d '/')
+    VPC_ID=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/vpc-id)
+    VPC_CIDR=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/vpc-ipv4-cidr-block)
+    SG_IDS=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/security-group-ids | tr '\n' ' ')
+    echo "INSTANCE_ID=$INSTANCE_ID"
+    echo "VPC_ID=$VPC_ID"
+    echo "VPC_CIDR=$VPC_CIDR"
+    echo "SG_IDS=$SG_IDS"
+  register: _metadata_raw
   changed_when: false
   failed_when: false
-  when: _instance_id.status == 200
 
-- name: "[Verify] Get VPC CIDR"
-  ansible.builtin.shell: >
-    aws ec2 describe-vpcs
-    --vpc-ids {{ _vpc_id.stdout | trim }}
-    --region {{ aws.aws_region }}
-    --query 'Vpcs[0].CidrBlock'
-    --output text
-  environment: >-
-    {{
-      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
-       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
-      if (aws.aws_access_key_id | default('')) != ''
-      else {}
-    }}
-  register: _vpc_cidr
-  changed_when: false
-  failed_when: false
-  when: _vpc_id.stdout is defined and _vpc_id.stdout != ''
-
-- name: "[Verify] Get security groups attached to instance"
-  ansible.builtin.shell: >
-    aws ec2 describe-instances
-    --instance-ids {{ _instance_id.content | trim }}
-    --region {{ aws.aws_region }}
-    --query 'Reservations[0].Instances[0].SecurityGroups[*].GroupId'
-    --output text
-  environment: >-
-    {{
-      {'AWS_ACCESS_KEY_ID': aws.aws_access_key_id,
-       'AWS_SECRET_ACCESS_KEY': aws.aws_secret_access_key}
-      if (aws.aws_access_key_id | default('')) != ''
-      else {}
-    }}
-  register: _sg_ids
-  changed_when: false
-  failed_when: false
-  when: _instance_id.status == 200
+- name: "[Verify] Parse metadata facts"
+  ansible.builtin.set_fact:
+    _instance_id_val: "{{ _metadata_raw.stdout | regex_search('INSTANCE_ID=(.+)', '\\1') | first | default('unknown') }}"
+    _vpc_id_val:      "{{ _metadata_raw.stdout | regex_search('VPC_ID=(.+)', '\\1') | first | default('unknown') }}"
+    _vpc_cidr_val:    "{{ _metadata_raw.stdout | regex_search('VPC_CIDR=(.+)', '\\1') | first | default('unknown') }}"
+    _sg_ids_val:      "{{ _metadata_raw.stdout | regex_search('SG_IDS=(.+)', '\\1') | first | default('') }}"
+  when: _metadata_raw.rc == 0
 
 - name: "[Verify] Check if port 389 is open in security groups"
   ansible.builtin.shell: >
     aws ec2 describe-security-groups
-    --group-ids {{ _sg_ids.stdout | trim | replace('\t', ' ') }}
+    --group-ids {{ _sg_ids_val | trim }}
     --region {{ aws.aws_region }}
     --query "SecurityGroups[*].IpPermissions[?FromPort<=\`{{ ldap_check_port }}\` && ToPort>=\`{{ ldap_check_port }}\`]"
     --output json
@@ -181,13 +151,13 @@
   register: _sg_rules
   changed_when: false
   failed_when: false
-  when: _sg_ids.stdout is defined and _sg_ids.stdout != ''
+  when: (_sg_ids_val | default('')) != ''
 
 - name: "[Verify] Set port_389_open fact"
   ansible.builtin.set_fact:
     _port_open: >-
       {{ (_sg_rules.stdout | from_json | flatten | length) > 0 }}
-  when: _sg_rules.stdout is defined
+  when: _sg_rules.stdout is defined and _sg_rules.stdout != ''
 
 # --------------------------------------------------------------------------
 # Summary
@@ -205,12 +175,12 @@
       - "OCP groups:       {{ 'FOUND' if 'openshift-' in _groups_search.stdout else 'MISSING' }}"
       - ""
       - "EC2 / VPC:"
-      - "  Instance:       {{ _instance_id.content | default('unknown') | trim }}"
-      - "  VPC:            {{ _vpc_id.stdout | default('unknown') | trim }}"
-      - "  VPC CIDR:       {{ _vpc_cidr.stdout | default('unknown') | trim }}"
+      - "  Instance:       {{ _instance_id_val | default('unknown') }}"
+      - "  VPC:            {{ _vpc_id_val | default('unknown') }}"
+      - "  VPC CIDR:       {{ _vpc_cidr_val | default('unknown') }}"
       - "  Port {{ ldap_check_port }} open:  {{ _port_open | default('unknown') }}"
       - ""
-      - "{{ 'ACTION REQUIRED: Add inbound rule — Custom TCP / Port ' ~ ldap_check_port ~ ' / Source: ' ~ (_vpc_cidr.stdout | default('<vpc-cidr>') | trim)
+      - "{{ 'ACTION REQUIRED: Add inbound rule — Custom TCP / Port ' ~ ldap_check_port ~ ' / Source: ' ~ (_vpc_cidr_val | default('<vpc-cidr>'))
            if not (_port_open | default(true) | bool)
            else 'Security group allows port ' ~ ldap_check_port ~ ' — cluster nodes can reach LDAP.' }}"
       - "======================================================================"
