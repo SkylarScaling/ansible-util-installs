@@ -299,6 +299,8 @@
     'InvalidPermission.Duplicate' not in (_sg_result.stdout + _sg_result.stderr)
   loop: "{{ _ldap_sg_ids | default([]) }}"
   when:
+    - aws is defined
+    - (aws.aws_region | default('')) != ''
     - (_ldap_vpc_cidr | default('')) != ''
     - (_ldap_sg_ids | default([]) | length) > 0
 
