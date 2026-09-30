@@ -292,14 +292,19 @@
     --port {{ ds389_ldap_port }}
     --cidr {{ _ldap_vpc_cidr }}
     --region {{ aws.aws_region }} 2>&1
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
   register: _sg_result
   changed_when: _sg_result.rc == 0
   failed_when: >
     _sg_result.rc != 0 and
     'InvalidPermission.Duplicate' not in (_sg_result.stdout + _sg_result.stderr)
   loop: "{{ _ldap_sg_ids | default([]) }}"
+  no_log: true
   when:
     - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
     - (aws.aws_region | default('')) != ''
     - (_ldap_vpc_cidr | default('')) != ''
     - (_ldap_sg_ids | default([]) | length) > 0
