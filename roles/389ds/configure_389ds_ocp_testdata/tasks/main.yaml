@@ -31,6 +31,25 @@
   changed_when: false
 
 # --------------------------------------------------------------------------
+# Grant authenticated users read access to the whole suffix.
+# The 389 DS auto-init may not create the standard anonymous/authenticated
+# read ACI, which causes the service account bind to succeed but return
+# zero results for group and user searches.
+# --------------------------------------------------------------------------
+- name: Grant authenticated users read access to the directory
+  ansible.builtin.shell:
+    cmd: "ldapmodify -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    stdin: |
+      dn: {{ _suffix }}
+      changetype: modify
+      add: aci
+      aci: (targetattr="*")(version 3.0; acl "Allow authenticated read"; allow (read,search,compare) userdn="ldap:///all";)
+  register: _aci_result
+  changed_when: _aci_result.rc == 0
+  failed_when: _aci_result.rc not in [0, 20]
+  no_log: true
+
+# --------------------------------------------------------------------------
 # Organisational Units
 # rc=68 = LDAP_ALREADY_EXISTS — treat as success (idempotent)
 # --------------------------------------------------------------------------
