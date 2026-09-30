@@ -3,8 +3,11 @@
 # Install 389 Directory Server and create OCP test users and groups.
 # Replaces the earlier FreeIPA playbook — same purpose, no CA/Kerberos/Java.
 #
-# Run from the playbooks/ directory:
-#   ansible-playbook install-ldap-server.yaml -i inventory-ldap.yaml
+# Run from the playbooks/ directory (pass both inventories — aws credentials
+# from disconnected-aws-inventory are needed for the EC2 security group rule):
+#   ansible-playbook install-ldap-server.yaml \
+#     -i ~/inventories/ldap-inventory.yaml \
+#     -i ~/inventories/disconnected-aws-inventory
 #
 # To skip test data creation:
 #   ansible-playbook install-ldap-server.yaml -i inventory-ldap.yaml --skip-tags testdata

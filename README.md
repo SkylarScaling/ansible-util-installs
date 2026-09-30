@@ -54,24 +54,37 @@ FreeIPA's CA (Dogtag PKI) is Java-based and fails in constrained container envir
 
 ### Run
 
+Pass both inventories so AWS credentials from `disconnected-aws-inventory`
+are available for the EC2 security group rule:
+
 ```bash
 cd playbooks
-ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
+ansible-playbook install-ldap-server.yaml \
+  -i ~/inventories/ldap-inventory.yaml \
+  -i ~/inventories/disconnected-aws-inventory
 ```
 
 Install server only (skip test data):
 ```bash
-ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml --skip-tags testdata
+ansible-playbook install-ldap-server.yaml \
+  -i ~/inventories/ldap-inventory.yaml \
+  -i ~/inventories/disconnected-aws-inventory \
+  --skip-tags testdata
 ```
 
 Create/refresh test data only (server already running):
 ```bash
-ansible-playbook install-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml --tags testdata
+ansible-playbook install-ldap-server.yaml \
+  -i ~/inventories/ldap-inventory.yaml \
+  -i ~/inventories/disconnected-aws-inventory \
+  --tags testdata
 ```
 
 Verify LDAP is reachable:
 ```bash
-ansible-playbook verify-ldap-server.yaml -i ~/inventories/ldap-inventory.yaml
+ansible-playbook verify-ldap-server.yaml \
+  -i ~/inventories/ldap-inventory.yaml \
+  -i ~/inventories/disconnected-aws-inventory
 ```
 
 ---
