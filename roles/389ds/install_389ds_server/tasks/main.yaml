@@ -286,7 +286,7 @@
 
 - name: Add port {{ ds389_ldap_port }} inbound rule to EC2 security groups
   ansible.builtin.shell: >
-    aws ec2 authorize-security-group-ingress
+    /usr/local/bin/aws ec2 authorize-security-group-ingress
     --group-id {{ item }}
     --protocol tcp
     --port {{ ds389_ldap_port }}
