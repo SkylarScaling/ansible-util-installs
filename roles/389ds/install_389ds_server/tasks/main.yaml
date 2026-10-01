@@ -138,7 +138,10 @@
   become: false
   no_log: true
 
-- name: Create 389 DS Service (ClusterIP — reachable only within the cluster)
+# LoadBalancer exposes LDAP externally via AWS NLB so both hub and spoke
+# OAuth controllers can reach it (spoke clusters connect to hub external endpoints
+# the same way they pull images from the hub's Quay registry).
+- name: Create 389 DS Service (LoadBalancer — accessible from all clusters)
   ansible.builtin.shell:
     cmd: "{{ bin_dir | default('~/.local/bin') }}/oc apply --kubeconfig {{ hub_kubeconfig }} -f -"
     stdin: |
@@ -147,8 +150,10 @@
       metadata:
         name: {{ ds389.service_name }}
         namespace: {{ ds389.namespace }}
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
       spec:
-        type: ClusterIP
+        type: LoadBalancer
         selector:
           app: {{ ds389.deployment_name }}
         ports:
@@ -157,6 +162,23 @@
             targetPort: {{ ds389.container_port }}
   changed_when: true
   become: false
+
+- name: Wait for LoadBalancer DNS to be assigned
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc get service {{ ds389.service_name }}
+    -n {{ ds389.namespace }}
+    --kubeconfig {{ hub_kubeconfig }}
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null
+  register: _lb_dns
+  until: _lb_dns.stdout | trim != ''
+  retries: 40
+  delay: 15
+  changed_when: false
+  become: false
+
+- name: Set LoadBalancer DNS fact
+  ansible.builtin.set_fact:
+    ds389_lb_dns: "{{ _lb_dns.stdout | trim }}"
 
 # --------------------------------------------------------------------------
 # Wait for Deployment rollout to complete
@@ -266,10 +288,14 @@
       - "======================================================================"
       - "389 Directory Server Ready (running inside OCP)"
       - "======================================================================"
-      - "Deployment:  {{ ds389.namespace }}/{{ ds389.deployment_name }}"
+      - "Deployment:     {{ ds389.namespace }}/{{ ds389.deployment_name }}"
+      - "LoadBalancer:   {{ ds389_lb_dns }}:389"
       - ""
-      - "LDAP URL:    {{ _ldap_svc_url }}"
-      - "  (cluster-internal — reachable from all pods and OCP controllers)"
+      - "Update disconnected-aws-inventory with:"
+      - "  ldap:"
+      - "    url: \"ldap://{{ ds389_lb_dns }}:389/ou=people,{{ ds389.suffix }}?uid\""
+      - "  groupsync:"
+      - "    ldap_url: \"ldap://{{ ds389_lb_dns }}:389\""
       - ""
       - "Suffix:      {{ ds389.suffix }}"
       - "Root DN:     {{ ds389.root_dn }}"
