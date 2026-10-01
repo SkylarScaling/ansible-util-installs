@@ -10,6 +10,8 @@
 # --------------------------------------------------------------------------
 # Determine cluster Quay registry URL (auto-detect if not set in inventory)
 # --------------------------------------------------------------------------
+# Auto-detect Quay URL from inventory variables when not explicitly set.
+# Pattern: quay-registry-<registry_name>-<namespace>.apps.<hub_name>.<base_domain>
 - name: Get Quay route URL from cluster
   ansible.builtin.shell: >
     {{ bin_dir | default('~/.local/bin') }}/oc get route
@@ -21,9 +23,23 @@
   changed_when: false
   when: quay_registry_url | default('') == ""
 
+- name: Derive Quay URL from inventory if route query returned empty
+  ansible.builtin.set_fact:
+    _quay_url_derived: >-
+      {{ disconnected.quay_mirror.registry_name | default('quay-registry') -}}
+      -{{ disconnected.quay_mirror.namespace | default('local-quay') | replace('-', '-') -}}
+      .apps.acm-hub.{{ base_domain }}
+  when:
+    - quay_registry_url | default('') == ""
+    - _quay_route.stdout | default('') | trim == ""
+
 - name: Set Quay registry URL fact
   ansible.builtin.set_fact:
-    _quay_url: "{{ quay_registry_url if (quay_registry_url | default('')) != '' else (_quay_route.stdout | trim) }}"
+    _quay_url: >-
+      {{ quay_registry_url if (quay_registry_url | default('')) != ''
+         else (_quay_route.stdout | default('') | trim
+               if (_quay_route.stdout | default('') | trim != '')
+               else _quay_url_derived | default('')) }}
 
 - name: Set target image reference in cluster Quay
   ansible.builtin.set_fact:
