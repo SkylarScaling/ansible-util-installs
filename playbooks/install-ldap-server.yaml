@@ -43,7 +43,7 @@
 # ==============================================================================
 - name: Post-install Summary
   hosts: ldap_server
-  gather_facts: false
+  gather_facts: true
   become: false
   tags: ['always']
   tasks:
@@ -55,13 +55,19 @@
           - "=================================================================="
           - ""
           - "389 DS is running inside the OCP hub cluster:"
-          - "  ldap://389ds.openshift-config.svc.cluster.local:389"
+          - "  ldap://ds389.openshift-config.svc.cluster.local:389"
           - ""
-          - "Update disconnected-aws-inventory ldap and groupsync blocks"
-          - "to use the cluster-internal service URL (shown above)."
+          - "1. Update disconnected-aws-inventory ldap and groupsync blocks"
+          - "   to use the cluster-internal URL shown above."
           - ""
-          - "Then on the jumphost:"
-          - "  cd ~/71638776-openshift-automation/playbooks"
-          - "  ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory --tags hub"
-          - "  ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory --tags verify"
+          - "2. Copy inventory to jumphost:"
+          - "     scp -i {{ ansible_ssh_private_key_file }} ~/inventories/disconnected-aws-inventory {{ ansible_user }}@{{ ansible_host }}:~/71638776-openshift-automation/playbooks/"
+          - ""
+          - "3. SSH to jumphost:"
+          - "     ssh -i {{ ansible_ssh_private_key_file }} {{ ansible_user }}@{{ ansible_host }}"
+          - ""
+          - "4. Re-apply hub Day 2 config + verify:"
+          - "     cd ~/71638776-openshift-automation/playbooks"
+          - "     ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory --tags hub"
+          - "     ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory --tags verify"
           - "=================================================================="
