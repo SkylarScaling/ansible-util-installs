@@ -1,8 +1,8 @@
 ---
 ds389:
   namespace: "openshift-config"
-  deployment_name: "389ds"
-  service_name: "389ds"
+  deployment_name: "ds389"
+  service_name: "ds389"
   root_dn: "cn=Directory Manager"
   root_password: "ChangeMe123!"
   suffix: "dc=example,dc=com"
