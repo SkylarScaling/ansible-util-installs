@@ -141,6 +141,16 @@
 # LoadBalancer exposes LDAP externally via AWS NLB so both hub and spoke
 # OAuth controllers can reach it (spoke clusters connect to hub external endpoints
 # the same way they pull images from the hub's Quay registry).
+# Changing service type after creation is not allowed — delete first if it exists.
+- name: Delete existing ds389 Service to allow recreation as LoadBalancer
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc delete service {{ ds389.service_name }}
+    -n {{ ds389.namespace }}
+    --kubeconfig {{ hub_kubeconfig }}
+    --ignore-not-found
+  changed_when: true
+  become: false
+
 - name: Create 389 DS Service (LoadBalancer — accessible from all clusters)
   ansible.builtin.shell:
     cmd: "{{ bin_dir | default('~/.local/bin') }}/oc apply --kubeconfig {{ hub_kubeconfig }} -f -"
