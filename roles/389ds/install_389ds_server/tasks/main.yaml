@@ -10,8 +10,6 @@
 # --------------------------------------------------------------------------
 # Determine cluster Quay registry URL (auto-detect if not set in inventory)
 # --------------------------------------------------------------------------
-# Auto-detect Quay URL from inventory variables when not explicitly set.
-# Pattern: quay-registry-<registry_name>-<namespace>.apps.<hub_name>.<base_domain>
 - name: Get Quay route URL from cluster
   ansible.builtin.shell: >
     {{ bin_dir | default('~/.local/bin') }}/oc get route
@@ -21,13 +19,14 @@
     -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true
   register: _quay_route
   changed_when: false
+  become: false
   when: quay_registry_url | default('') == ""
 
 - name: Derive Quay URL from inventory if route query returned empty
   ansible.builtin.set_fact:
     _quay_url_derived: >-
       {{ disconnected.quay_mirror.registry_name | default('quay-registry') -}}
-      -{{ disconnected.quay_mirror.namespace | default('local-quay') | replace('-', '-') -}}
+      -quay-{{ disconnected.quay_mirror.namespace | default('local-quay') -}}
       .apps.acm-hub.{{ base_domain }}
   when:
     - quay_registry_url | default('') == ""
@@ -47,6 +46,7 @@
 
 # --------------------------------------------------------------------------
 # Mirror 389 DS image from internet to cluster Quay (jumphost has internet)
+# Podman tasks run as root (rootful podman). oc tasks run as ec2-user.
 # --------------------------------------------------------------------------
 - name: Pull 389 DS image on jumphost
   ansible.builtin.command: podman pull {{ ds389.source_image }}
@@ -66,6 +66,7 @@
     --tls-verify=false
   changed_when: false
   become: true
+  no_log: true
 
 - name: Push 389 DS image to cluster Quay
   ansible.builtin.command: podman push {{ _target_image }} --tls-verify=false
@@ -74,6 +75,7 @@
 
 # --------------------------------------------------------------------------
 # Deploy 389 DS to OCP as Deployment + ClusterIP Service + PVC
+# oc runs as ec2-user (become: false) — oc is in ec2-user's ~/.local/bin
 # --------------------------------------------------------------------------
 - name: Create PVC for 389 DS data
   ansible.builtin.shell:
@@ -91,6 +93,7 @@
             storage: {{ ds389.pvc_size }}
         {{ ('storageClassName: ' + ds389.storage_class) if ds389.storage_class | default('') != '' else '' }}
   changed_when: true
+  become: false
 
 - name: Create 389 DS Deployment
   ansible.builtin.shell:
@@ -132,6 +135,7 @@
                 persistentVolumeClaim:
                   claimName: {{ ds389.deployment_name }}-data
   changed_when: true
+  become: false
   no_log: true
 
 - name: Create 389 DS Service (ClusterIP — reachable only within the cluster)
@@ -152,6 +156,7 @@
             port: 389
             targetPort: {{ ds389.container_port }}
   changed_when: true
+  become: false
 
 # --------------------------------------------------------------------------
 # Wait for Deployment rollout to complete
@@ -164,6 +169,7 @@
     --kubeconfig {{ hub_kubeconfig }}
     --timeout=300s
   changed_when: false
+  become: false
 
 # --------------------------------------------------------------------------
 # Wait for LDAP port via oc exec (no network path needed)
@@ -182,6 +188,7 @@
   retries: "{{ (ds389_init_timeout / 5) | int }}"
   delay: 5
   changed_when: false
+  become: false
 
 # --------------------------------------------------------------------------
 # Create suffix backend + base entry if missing
@@ -198,6 +205,7 @@
   register: _suffix_check
   changed_when: false
   failed_when: _suffix_check.rc not in [0, 32]
+  become: false
 
 - name: Create backend and base entry via dsconf (suffix missing)
   ansible.builtin.shell: |
@@ -219,6 +227,7 @@
     _backend_create.rc != 0 and
     'already exists' not in (_backend_create.stdout + _backend_create.stderr) | lower
   when: _suffix_check.rc == 32
+  become: false
 
 # --------------------------------------------------------------------------
 # Add read ACI so service account can search the directory
@@ -241,6 +250,7 @@
   register: _aci_result
   changed_when: _aci_result.rc == 0
   failed_when: _aci_result.rc not in [0, 20]
+  become: false
   no_log: true
 
 # --------------------------------------------------------------------------
