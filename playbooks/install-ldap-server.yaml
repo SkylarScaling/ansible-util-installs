@@ -47,6 +47,16 @@
   become: false
   tags: ['always']
   tasks:
+    - name: Get ds389 LoadBalancer DNS
+      ansible.builtin.shell: >
+        {{ bin_dir | default('~/.local/bin') }}/oc get service {{ ds389.deployment_name | default('ds389') }}
+        -n {{ ds389.namespace | default('openshift-config') }}
+        --kubeconfig {{ hub_kubeconfig }}
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true
+      register: _summary_lb_dns
+      changed_when: false
+      failed_when: false
+
     - name: Print next steps
       ansible.builtin.debug:
         msg:
@@ -54,11 +64,11 @@
           - "LDAP Setup Complete"
           - "=================================================================="
           - ""
-          - "389 DS is running inside the OCP hub cluster:"
-          - "  ldap://ds389.openshift-config.svc.cluster.local:389"
+          - "389 DS LoadBalancer DNS:"
+          - "  {{ _summary_lb_dns.stdout | trim | default('(pending — check: oc get svc ds389 -n openshift-config)') }}"
           - ""
-          - "1. Update disconnected-aws-inventory ldap and groupsync blocks"
-          - "   to use the cluster-internal URL shown above."
+          - "1. Update disconnected-aws-inventory — set ldap.url and groupsync.ldap_url to:"
+          - "     ldap://{{ _summary_lb_dns.stdout | trim | default('<nlb-dns>') }}:389"
           - ""
           - "2. Copy inventory to jumphost:"
           - "     scp -i {{ ansible_ssh_private_key_file }} ~/inventories/disconnected-aws-inventory {{ ansible_user }}@{{ ansible_host }}:~/71638776-openshift-automation/playbooks/"
