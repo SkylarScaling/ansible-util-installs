@@ -32,6 +32,7 @@
   register: _result
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
+  become: false
   no_log: true
 
 - name: Create ou=groups OU
@@ -52,6 +53,7 @@
   register: _result
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
+  become: false
   no_log: true
 
 # --------------------------------------------------------------------------
@@ -81,6 +83,7 @@
   register: _result
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
+  become: false
   no_log: true
 
 # --------------------------------------------------------------------------
@@ -112,6 +115,7 @@
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
   loop: "{{ ds389_ocp_users }}"
+  become: false
   no_log: true
 
 # --------------------------------------------------------------------------
@@ -140,6 +144,7 @@
   changed_when: _result.rc == 0
   failed_when: _result.rc not in [0, 68]
   loop: "{{ ds389_ocp_groups }}"
+  become: false
   no_log: true
 
 # --------------------------------------------------------------------------
