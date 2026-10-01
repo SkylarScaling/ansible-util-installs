@@ -27,7 +27,7 @@
 
 - name: Set target image reference in cluster Quay
   ansible.builtin.set_fact:
-    _target_image: "{{ _quay_url }}/{{ quay_org }}/389ds/dirsrv:rocky-9"
+    _target_image: "{{ _quay_url }}/{{ quay_org }}/389ds/dirsrv:latest"
 
 # --------------------------------------------------------------------------
 # Mirror 389 DS image from internet to cluster Quay (jumphost has internet)
