@@ -1,24 +1,26 @@
 ---
 # ==============================================================================
-# Install 389 Directory Server and create OCP test users and groups.
-# Replaces the earlier FreeIPA playbook — same purpose, no CA/Kerberos/Java.
+# Install 389 Directory Server inside the OCP hub cluster and create OCP test
+# users and groups. In disconnected environments, pod egress to the internet is
+# blocked, so LDAP must run inside the cluster as a Deployment + ClusterIP
+# Service. The image is mirrored from the jumphost (which has internet access)
+# to the cluster's Quay registry.
 #
-# Run from the playbooks/ directory (pass both inventories — aws credentials
-# from disconnected-aws-inventory are needed for the EC2 security group rule):
+# Run from the playbooks/ directory (jumphost has both internet and kubeconfig):
 #   ansible-playbook install-ldap-server.yaml \
 #     -i ~/inventories/ldap-inventory.yaml \
 #     -i ~/inventories/disconnected-aws-inventory
 #
-# To skip test data creation:
-#   ansible-playbook install-ldap-server.yaml -i inventory-ldap.yaml --skip-tags testdata
+# --skip-tags testdata   Install server only
+# --tags testdata        Create/refresh test data only (server already running)
 # ==============================================================================
-- name: Install 389 Directory Server
+- name: Deploy 389 DS to OCP and mirror image to cluster Quay
   hosts: ldap_server
   gather_facts: true
   become: true
   tags: ['389ds']
   tasks:
-    - name: Install 389 DS
+    - name: Deploy 389 DS to OCP cluster
       ansible.builtin.include_role:
         name: 389ds/install_389ds_server
 
@@ -37,31 +39,29 @@
         (ds389_ldap_service_account is defined)
 
 # ==============================================================================
-# SUMMARY: Restate SSH and next-step info
+# SUMMARY
 # ==============================================================================
 - name: Post-install Summary
   hosts: ldap_server
-  gather_facts: true
+  gather_facts: false
   become: false
   tags: ['always']
   tasks:
-    - name: Print SSH connection and next steps
+    - name: Print next steps
       ansible.builtin.debug:
         msg:
           - "=================================================================="
           - "LDAP Setup Complete"
           - "=================================================================="
           - ""
-          - "1. Update disconnected-aws-inventory with:"
-          - "     jumphost_private_ip: \"{{ ansible_default_ipv4.address }}\""
+          - "389 DS is running inside the OCP hub cluster:"
+          - "  ldap://389ds.openshift-config.svc.cluster.local:389"
           - ""
-          - "2. Copy inventory to jumphost:"
-          - "     scp -i {{ ansible_ssh_private_key_file }} ~/inventories/disconnected-aws-inventory {{ ansible_user }}@{{ ansible_host }}:~/71638776-openshift-automation/playbooks/"
+          - "Update disconnected-aws-inventory ldap and groupsync blocks"
+          - "to use the cluster-internal service URL (shown above)."
           - ""
-          - "3. SSH to jumphost:"
-          - "     ssh -i {{ ansible_ssh_private_key_file }} {{ ansible_user }}@{{ ansible_host }}"
-          - ""
-          - "4. Run the disconnected build:"
-          - "     cd ~/71638776-openshift-automation/playbooks"
-          - "     ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory"
+          - "Then on the jumphost:"
+          - "  cd ~/71638776-openshift-automation/playbooks"
+          - "  ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory --tags hub"
+          - "  ansible-playbook hub-spoke-disconnected-setup.yaml -i disconnected-aws-inventory --tags verify"
           - "=================================================================="

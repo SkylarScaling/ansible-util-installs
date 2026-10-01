@@ -1,12 +1,23 @@
 ---
 ds389:
-  container_name: "389ds"
-  image: "quay.io/389ds/dirsrv"
-  data_dir: "/opt/389ds/data"
+  namespace: "openshift-config"
+  deployment_name: "389ds"
+  service_name: "389ds"
   root_dn: "cn=Directory Manager"
   root_password: "ChangeMe123!"
   suffix: "dc=example,dc=com"
+  container_port: 3389        # 389 DS listens on 3389 inside container
+  source_image: "quay.io/389ds/dirsrv:rocky-9"
+  pvc_size: "5Gi"
+  storage_class: ""           # empty = use cluster default StorageClass
 
-ds389_ldap_port: 389    # host port mapped to container's 3389
-ds389_ldaps_port: 636   # host port mapped to container's 3636
-ds389_init_timeout: 120
+# Hub cluster kubeconfig path (on the machine running the playbook)
+hub_kubeconfig: "~/tmp/acm-global-hub/install/acm-hub/auth/kubeconfig"
+
+# Cluster-internal Quay registry for the mirrored 389 DS image
+quay_registry_url: ""         # auto-detected from cluster if empty
+quay_admin_user: "quayadmin"
+quay_admin_password: "ChangeMe123!"
+quay_org: "ocp4"
+
+ds389_init_timeout: 180       # seconds to wait for 389 DS to accept connections

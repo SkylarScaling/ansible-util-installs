@@ -1,63 +1,32 @@
 ---
-- name: Install openldap-clients (provides ldapadd/ldapmodify)
-  ansible.builtin.dnf:
-    name: openldap-clients
-    state: present
-
-# Helper variable used throughout
-- name: Set LDAP connection facts
+# All LDAP operations go through 'oc exec' into the 389 DS pod.
+# No SSH + ldapadd on the jumphost — the pod is inside the cluster.
+- name: Set internal LDAP service URL
   ansible.builtin.set_fact:
-    _ldap_url: "ldap://localhost:{{ ds389_ldap_port }}"
-    _bind_dn: "{{ ds389.root_dn }}"
-    _bind_pw: "{{ ds389.root_password }}"
-    _suffix: "{{ ds389.suffix }}"
+    _svc_url: "ldap://{{ ds389.service_name }}.{{ ds389.namespace }}.svc.cluster.local:389"
+    _exec_prefix: >-
+      {{ bin_dir | default('~/.local/bin') }}/oc exec -i
+      -n {{ ds389.namespace }}
+      deployment/{{ ds389.deployment_name }}
+      --kubeconfig {{ hub_kubeconfig }}
+      --
 
 # --------------------------------------------------------------------------
-# Wait for 389 DS to finish auto-initializing the suffix backend.
-# The LDAP port opens before the suffix entry is created, so ldapadd
-# operations must be deferred until the base entry is queryable.
-# Anonymous search on the base suffix is safe — no credentials in output.
-# --------------------------------------------------------------------------
-- name: Wait for 389 DS to be ready (check root DSE)
-  ansible.builtin.shell: >
-    ldapsearch -x
-    -H {{ _ldap_url }}
-    -b ''
-    -s base namingContexts 2>&1
-  register: _ds_ready
-  until: _ds_ready.rc == 0
-  retries: 24
-  delay: 10
-  changed_when: false
-
-# --------------------------------------------------------------------------
-# Grant authenticated users read access to the whole suffix.
-# The 389 DS auto-init may not create the standard anonymous/authenticated
-# read ACI, which causes the service account bind to succeed but return
-# zero results for group and user searches.
-# --------------------------------------------------------------------------
-- name: Grant authenticated users read access to the directory
-  ansible.builtin.shell:
-    cmd: "ldapmodify -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
-    stdin: |
-      dn: {{ _suffix }}
-      changetype: modify
-      add: aci
-      aci: (targetattr="*")(version 3.0; acl "Allow authenticated read"; allow (read,search,compare) userdn="ldap:///all";)
-  register: _aci_result
-  changed_when: _aci_result.rc == 0
-  failed_when: _aci_result.rc not in [0, 20]
-  no_log: true
-
-# --------------------------------------------------------------------------
-# Organisational Units
-# rc=68 = LDAP_ALREADY_EXISTS — treat as success (idempotent)
+# Base OUs
 # --------------------------------------------------------------------------
 - name: Create ou=people OU
   ansible.builtin.shell:
-    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    cmd: >
+      {{ bin_dir | default('~/.local/bin') }}/oc exec -i
+      -n {{ ds389.namespace }}
+      deployment/{{ ds389.deployment_name }}
+      --kubeconfig {{ hub_kubeconfig }}
+      -- ldapadd -x
+      -H ldap://localhost:{{ ds389.container_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
     stdin: |
-      dn: ou=people,{{ _suffix }}
+      dn: ou=people,{{ ds389.suffix }}
       objectClass: organizationalUnit
       ou: people
   register: _result
@@ -67,9 +36,17 @@
 
 - name: Create ou=groups OU
   ansible.builtin.shell:
-    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    cmd: >
+      {{ bin_dir | default('~/.local/bin') }}/oc exec -i
+      -n {{ ds389.namespace }}
+      deployment/{{ ds389.deployment_name }}
+      --kubeconfig {{ hub_kubeconfig }}
+      -- ldapadd -x
+      -H ldap://localhost:{{ ds389.container_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
     stdin: |
-      dn: ou=groups,{{ _suffix }}
+      dn: ou=groups,{{ ds389.suffix }}
       objectClass: organizationalUnit
       ou: groups
   register: _result
@@ -78,13 +55,21 @@
   no_log: true
 
 # --------------------------------------------------------------------------
-# LDAP service account (OCP bind user)
+# LDAP service account
 # --------------------------------------------------------------------------
 - name: Create LDAP service account
   ansible.builtin.shell:
-    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    cmd: >
+      {{ bin_dir | default('~/.local/bin') }}/oc exec -i
+      -n {{ ds389.namespace }}
+      deployment/{{ ds389.deployment_name }}
+      --kubeconfig {{ hub_kubeconfig }}
+      -- ldapadd -x
+      -H ldap://localhost:{{ ds389.container_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
     stdin: |
-      dn: uid={{ ds389_ldap_service_account.username }},ou=people,{{ _suffix }}
+      dn: uid={{ ds389_ldap_service_account.username }},ou=people,{{ ds389.suffix }}
       objectClass: inetOrgPerson
       objectClass: organizationalPerson
       objectClass: person
@@ -103,9 +88,17 @@
 # --------------------------------------------------------------------------
 - name: Create OCP test users
   ansible.builtin.shell:
-    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    cmd: >
+      {{ bin_dir | default('~/.local/bin') }}/oc exec -i
+      -n {{ ds389.namespace }}
+      deployment/{{ ds389.deployment_name }}
+      --kubeconfig {{ hub_kubeconfig }}
+      -- ldapadd -x
+      -H ldap://localhost:{{ ds389.container_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
     stdin: |
-      dn: uid={{ item.username }},ou=people,{{ _suffix }}
+      dn: uid={{ item.username }},ou=people,{{ ds389.suffix }}
       objectClass: inetOrgPerson
       objectClass: organizationalPerson
       objectClass: person
@@ -122,20 +115,26 @@
   no_log: true
 
 # --------------------------------------------------------------------------
-# OCP groups with members.
-# groupOfNames requires at least one member — users must exist first.
-# rc=68 = already exists (idempotent).
+# OCP groups (groupOfNames requires at least one member)
 # --------------------------------------------------------------------------
 - name: Create OCP groups with members
   ansible.builtin.shell:
-    cmd: "ldapadd -x -H {{ _ldap_url }} -D '{{ _bind_dn }}' -w '{{ _bind_pw }}'"
+    cmd: >
+      {{ bin_dir | default('~/.local/bin') }}/oc exec -i
+      -n {{ ds389.namespace }}
+      deployment/{{ ds389.deployment_name }}
+      --kubeconfig {{ hub_kubeconfig }}
+      -- ldapadd -x
+      -H ldap://localhost:{{ ds389.container_port }}
+      -D '{{ ds389.root_dn }}'
+      -w '{{ ds389.root_password }}'
     stdin: |
-      dn: cn={{ item }},ou=groups,{{ _suffix }}
+      dn: cn={{ item }},ou=groups,{{ ds389.suffix }}
       objectClass: groupOfNames
       objectClass: top
       cn: {{ item }}
       {% for user in ds389_ocp_users if item in (user.groups | default([])) %}
-      member: uid={{ user.username }},ou=people,{{ _suffix }}
+      member: uid={{ user.username }},ou=people,{{ ds389.suffix }}
       {% endfor %}
   register: _result
   changed_when: _result.rc == 0
@@ -144,29 +143,32 @@
   no_log: true
 
 # --------------------------------------------------------------------------
-# Print only what needs to be updated in the OCP inventory.
-# The ldap/rbac_bindings/groupsync blocks are pre-populated with Jinja2
-# templates driven by base_domain. The only value that changes per
-# environment and must be filled in manually is jumphost_private_ip.
+# OCP inventory snippets
 # --------------------------------------------------------------------------
 - name: Print OCP inventory update
   ansible.builtin.debug:
     msg:
       - "======================================================================"
-      - "389 DS ready. One value to add/update in disconnected-aws-inventory:"
+      - "389 DS test data created. Use these values in disconnected-aws-inventory:"
       - "======================================================================"
       - ""
-      - "  jumphost_private_ip: \"{{ ansible_default_ipv4.address }}\""
+      - "LDAP URL (cluster-internal, no DNS/network issues):"
+      - "  ldap:"
+      - "    url: \"ldap://{{ ds389.service_name }}.{{ ds389.namespace }}.svc.cluster.local:389/ou=people,{{ ds389.suffix }}?uid\""
+      - "    bind_dn: \"uid={{ ds389_ldap_service_account.username }},ou=people,{{ ds389.suffix }}\""
+      - "    bind_password: \"{{ ds389_ldap_service_account.password }}\""
+      - "    insecure: true"
+      - "    ca_cert: \"\""
       - ""
-      - "The ldap, rbac_bindings, and groupsync blocks are already in the"
-      - "inventory and derive their values from base_domain and jumphost_private_ip."
+      - "  groupsync:"
+      - "    ldap_url: \"ldap://{{ ds389.service_name }}.{{ ds389.namespace }}.svc.cluster.local:389\""
+      - "    bind_dn: \"uid={{ ds389_ldap_service_account.username }},ou=people,{{ ds389.suffix }}\""
+      - "    bind_password: \"{{ ds389_ldap_service_account.password }}\""
+      - "    groups_base_dn: \"ou=groups,{{ ds389.suffix }}\""
+      - "    groups_filter: \"(&(objectClass=groupOfNames)(cn=openshift-*))\""
+      - "    users_base_dn: \"ou=people,{{ ds389.suffix }}\""
       - ""
-      - "Resolved URLs for this environment:"
-      - "  LDAP:   ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}/ou=people,{{ _suffix }}?uid"
-      - "  Groups: ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}"
-      - "  Suffix: {{ _suffix }}"
-      - ""
-      - "Test users (all passwords: {{ ds389_ocp_users[0].password }}):"
-      - "{% for u in ds389_ocp_users %}  {{ u.username }}  → {{ u.groups | join(', ') }}{% endfor %}"
+      - "Test users (password: {{ ds389_ocp_users[0].password }}):"
+      - "{% for u in ds389_ocp_users %}  {{ u.username }} → {{ u.groups | join(', ') }}{% endfor %}"
       - "Bind account: {{ ds389_ldap_service_account.username }} / {{ ds389_ldap_service_account.password }}"
       - "======================================================================"

@@ -92,13 +92,14 @@ ansible-playbook verify-ldap-server.yaml \
 ### Example Inventory
 
 The jumphost public DNS name comes from the `provision-jumphost.yaml` summary output.
+The 389 DS image is mirrored **from the jumphost** to the cluster's Quay — the jumphost
+has internet access; the cluster pods do not.
 
 ```yaml
 all:
   vars:
     # -----------------------------------------------------------------------
     # Update these two values when you provision a new test environment.
-    # Everything else is derived from them.
     # -----------------------------------------------------------------------
     sandbox_domain: "sandbox2915.opentlc.com"                               # changes each environment
     jumphost_public_dns: "ec2-<public-ip>.us-east-2.compute.amazonaws.com"  # from provision-jumphost output
@@ -112,11 +113,20 @@ all:
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
           ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-          # 389 DS server settings
+          # Hub cluster kubeconfig (on the jumphost)
+          hub_kubeconfig: "~/tmp/acm-global-hub/install/acm-hub/auth/kubeconfig"
+
+          # Cluster Quay credentials (image is pushed here by the role)
+          quay_registry_url: ""      # auto-detected from cluster route if empty
+          quay_admin_user: "quayadmin"
+          quay_admin_password: "<quay_admin_password>"
+          quay_org: "ocp4"
+
+          # 389 DS settings — deployed to OCP, not the jumphost
           ds389:
-            container_name: "389ds"
-            image: "quay.io/389ds/dirsrv"
-            data_dir: "/opt/389ds/data"
+            namespace: "openshift-config"
+            deployment_name: "389ds"
+            service_name: "389ds"
             root_dn: "cn=Directory Manager"
             root_password: "<dm_password>"
             suffix: "dc={{ sandbox_domain.split('.') | join(',dc=') }}"
@@ -160,18 +170,14 @@ all:
 
 ### OCP Inventory Update (printed at end of run)
 
-The playbook prints the **one value** that needs to be set per environment. Everything else is pre-populated in the OCP inventory using Jinja2 templates driven by `base_domain`.
+389 DS now runs **inside the OCP cluster** as a ClusterIP Service. No `jumphost_private_ip`
+or public IP needed — use the cluster-internal DNS name:
 
-```
-jumphost_private_ip: "10.0.0.x"   ← add/update this in disconnected-aws-inventory
-```
-
-**Pre-populate these blocks once in your OCP inventory** — they never change between environments because `base_domain` and `jumphost_private_ip` drive all the derived values:
+**Pre-populate these blocks in your OCP inventory once** — they use the cluster-internal
+service URL which never changes between environments:
 
 ```yaml
 # In disconnected-aws-inventory all.vars:
-
-jumphost_private_ip: ""   # ← fill in after running install-ldap-server.yaml
 
 ntp_servers:
   - 169.254.169.123
@@ -179,7 +185,7 @@ ntp_servers:
 
 ldap:
   name: "389ds"
-  url: "ldap://{{ jumphost_private_ip }}:389/ou=people,dc={{ base_domain.split('.') | join(',dc=') }}?uid"
+  url: "ldap://389ds.openshift-config.svc.cluster.local:389/ou=people,dc={{ base_domain.split('.') | join(',dc=') }}?uid"
   bind_dn: "uid=ldap-svc,ou=people,dc={{ base_domain.split('.') | join(',dc=') }}"
   bind_password: "<service_account_password>"
   insecure: true
@@ -200,7 +206,7 @@ rbac_bindings:
 
 groupsync:
   schedule: "0 * * * *"
-  ldap_url: "ldap://{{ jumphost_private_ip }}:389"
+  ldap_url: "ldap://389ds.openshift-config.svc.cluster.local:389"
   bind_dn: "uid=ldap-svc,ou=people,dc={{ base_domain.split('.') | join(',dc=') }}"
   bind_password: "<service_account_password>"
   ca_cert: ""

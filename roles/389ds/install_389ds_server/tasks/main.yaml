@@ -4,71 +4,164 @@
     that:
       - ds389.root_password is defined and ds389.root_password != ""
       - ds389.suffix is defined and ds389.suffix != ""
-    fail_msg: "ds389.root_password and ds389.suffix must be defined"
+      - hub_kubeconfig is defined and hub_kubeconfig != ""
+    fail_msg: "ds389.root_password, ds389.suffix, and hub_kubeconfig must be defined"
 
 # --------------------------------------------------------------------------
-# Host preparation
+# Determine cluster Quay registry URL (auto-detect if not set in inventory)
 # --------------------------------------------------------------------------
-- name: Ensure required packages are installed
-  ansible.builtin.dnf:
-    name:
-      - podman
-      - openldap-clients
-    state: present
-
-- name: Create 389 DS data directory
-  ansible.builtin.file:
-    path: "{{ ds389.data_dir }}"
-    state: directory
-    mode: '0755'
-
-- name: Pull 389 DS image
-  ansible.builtin.command: podman pull {{ ds389.image }}
-  changed_when: true
-  register: _pull_result
-  retries: 3
-  delay: 10
-  until: _pull_result.rc == 0
-
-# --------------------------------------------------------------------------
-# Container lifecycle
-# --------------------------------------------------------------------------
-- name: Check if 389 DS container exists
-  ansible.builtin.command: podman inspect {{ ds389.container_name }}
-  register: _container_inspect
+- name: Get Quay route URL from cluster
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc get route
+    -n {{ disconnected.quay_mirror.namespace | default('local-quay') }}
+    --kubeconfig {{ hub_kubeconfig }}
+    -l quay-component=quay-app-route
+    -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true
+  register: _quay_route
   changed_when: false
-  failed_when: false
+  when: quay_registry_url | default('') == ""
 
-- name: Set container state facts
+- name: Set Quay registry URL fact
   ansible.builtin.set_fact:
-    _container_exists: "{{ _container_inspect.rc == 0 }}"
-    _container_status: >-
-      {{ (_container_inspect.stdout | from_json)[0].State.Status
-         if _container_inspect.rc == 0 else 'missing' }}
+    _quay_url: "{{ quay_registry_url if (quay_registry_url | default('')) != '' else (_quay_route.stdout | trim) }}"
 
-- name: Start existing container if stopped
-  ansible.builtin.command: podman start {{ ds389.container_name }}
-  when: _container_exists and _container_status != 'running'
+- name: Set target image reference in cluster Quay
+  ansible.builtin.set_fact:
+    _target_image: "{{ _quay_url }}/{{ quay_org }}/389ds/dirsrv:rocky-9"
+
+# --------------------------------------------------------------------------
+# Mirror 389 DS image from internet to cluster Quay (jumphost has internet)
+# --------------------------------------------------------------------------
+- name: Pull 389 DS image on jumphost
+  ansible.builtin.command: podman pull {{ ds389.source_image }}
+  changed_when: true
+  become: true
+
+- name: Tag image for cluster Quay
+  ansible.builtin.command: podman tag {{ ds389.source_image }} {{ _target_image }}
+  changed_when: true
+  become: true
+
+- name: Login to cluster Quay
+  ansible.builtin.command: >
+    podman login {{ _quay_url }}
+    -u {{ quay_admin_user }}
+    -p {{ quay_admin_password }}
+    --tls-verify=false
+  changed_when: false
+  become: true
+  no_log: true
+
+- name: Push 389 DS image to cluster Quay
+  ansible.builtin.command: podman push {{ _target_image }} --tls-verify=false
+  changed_when: true
+  become: true
+
+# --------------------------------------------------------------------------
+# Deploy 389 DS to OCP as Deployment + ClusterIP Service + PVC
+# --------------------------------------------------------------------------
+- name: Create PVC for 389 DS data
+  ansible.builtin.shell:
+    cmd: "{{ bin_dir | default('~/.local/bin') }}/oc apply --kubeconfig {{ hub_kubeconfig }} -f -"
+    stdin: |
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: {{ ds389.deployment_name }}-data
+        namespace: {{ ds389.namespace }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ ds389.pvc_size }}
+        {{ ('storageClassName: ' + ds389.storage_class) if ds389.storage_class | default('') != '' else '' }}
   changed_when: true
 
-- name: Run 389 DS container (first time or after cleanup)
-  ansible.builtin.command: >
-    podman run -d
-    --name {{ ds389.container_name }}
-    -p {{ ds389_ldap_port }}:3389
-    -p {{ ds389_ldaps_port }}:3636
-    -v {{ ds389.data_dir }}:/data:Z
-    -e DS_DM_PASSWORD={{ ds389.root_password }}
-    {{ ds389.image }}
-  when: not _container_exists
+- name: Create 389 DS Deployment
+  ansible.builtin.shell:
+    cmd: "{{ bin_dir | default('~/.local/bin') }}/oc apply --kubeconfig {{ hub_kubeconfig }} -f -"
+    stdin: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: {{ ds389.deployment_name }}
+        namespace: {{ ds389.namespace }}
+        labels:
+          app: {{ ds389.deployment_name }}
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: {{ ds389.deployment_name }}
+        template:
+          metadata:
+            labels:
+              app: {{ ds389.deployment_name }}
+          spec:
+            containers:
+              - name: 389ds
+                image: {{ _target_image }}
+                imagePullPolicy: Always
+                ports:
+                  - containerPort: {{ ds389.container_port }}
+                env:
+                  - name: DS_DM_PASSWORD
+                    value: "{{ ds389.root_password }}"
+                  - name: DS_SUFFIX_NAME
+                    value: "{{ ds389.suffix }}"
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: {{ ds389.deployment_name }}-data
   changed_when: true
   no_log: true
 
-- name: Wait for 389 DS to accept LDAP operations (root DSE query)
+- name: Create 389 DS Service (ClusterIP — reachable only within the cluster)
+  ansible.builtin.shell:
+    cmd: "{{ bin_dir | default('~/.local/bin') }}/oc apply --kubeconfig {{ hub_kubeconfig }} -f -"
+    stdin: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: {{ ds389.service_name }}
+        namespace: {{ ds389.namespace }}
+      spec:
+        type: ClusterIP
+        selector:
+          app: {{ ds389.deployment_name }}
+        ports:
+          - name: ldap
+            port: 389
+            targetPort: {{ ds389.container_port }}
+  changed_when: true
+
+# --------------------------------------------------------------------------
+# Wait for Deployment rollout to complete
+# --------------------------------------------------------------------------
+- name: Wait for 389 DS Deployment to be available
   ansible.builtin.shell: >
-    ldapsearch -x
-    -H ldap://localhost:{{ ds389_ldap_port }}
-    -b '' -s base namingContexts 2>&1
+    {{ bin_dir | default('~/.local/bin') }}/oc rollout status
+    deployment/{{ ds389.deployment_name }}
+    -n {{ ds389.namespace }}
+    --kubeconfig {{ hub_kubeconfig }}
+    --timeout=300s
+  changed_when: false
+
+# --------------------------------------------------------------------------
+# Wait for LDAP port via oc exec (no network path needed)
+# --------------------------------------------------------------------------
+- name: Wait for 389 DS LDAP to accept connections (via oc exec)
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc exec
+    -n {{ ds389.namespace }}
+    deployment/{{ ds389.deployment_name }}
+    --kubeconfig {{ hub_kubeconfig }}
+    -- ldapsearch -x
+    -H ldap://localhost:{{ ds389.container_port }}
+    -b "" -s base namingContexts 2>/dev/null
   register: _ldap_ready
   until: _ldap_ready.rc == 0
   retries: "{{ (ds389_init_timeout / 5) | int }}"
@@ -76,279 +169,83 @@
   changed_when: false
 
 # --------------------------------------------------------------------------
-# Verify the suffix base entry exists.
-# rc=0  → suffix entry present, nothing to do.
-# rc=32 → No such object — backend missing or base entry not yet added.
-# Any other rc → connection/auth problem (fail loudly).
+# Create suffix backend + base entry if missing
 # --------------------------------------------------------------------------
 - name: Check if suffix base entry exists
   ansible.builtin.shell: >
-    ldapsearch -x
-    -H ldap://localhost:{{ ds389_ldap_port }}
-    -b '{{ ds389.suffix }}'
-    -s base dn 2>&1
+    {{ bin_dir | default('~/.local/bin') }}/oc exec
+    -n {{ ds389.namespace }}
+    deployment/{{ ds389.deployment_name }}
+    --kubeconfig {{ hub_kubeconfig }}
+    -- ldapsearch -x
+    -H ldap://localhost:{{ ds389.container_port }}
+    -b '{{ ds389.suffix }}' -s base dn 2>/dev/null
   register: _suffix_check
   changed_when: false
   failed_when: _suffix_check.rc not in [0, 32]
 
-- name: Set suffix_ready fact
-  ansible.builtin.set_fact:
-    _suffix_ready: "{{ _suffix_check.rc == 0 }}"
-
-# --------------------------------------------------------------------------
-# If suffix is missing: stop/remove stale container, wipe data, start fresh.
-# Then create the backend AND base entry explicitly with dsconf so we are
-# not dependent on DS_SUFFIX_NAME auto-init (which is skipped if /data has
-# any prior content).
-# --------------------------------------------------------------------------
-- name: Recovery — stop systemd service before cleanup
-  ansible.builtin.systemd:
-    name: "container-{{ ds389.container_name }}.service"
-    state: stopped
-    enabled: false
-  failed_when: false
-  when: not _suffix_ready and _container_exists
-
-- name: Recovery — remove stale container
-  ansible.builtin.command: podman rm -f {{ ds389.container_name }}
-  when: not _suffix_ready and _container_exists
-  changed_when: true
-
-- name: Recovery — wipe data directory
-  ansible.builtin.file:
-    path: "{{ ds389.data_dir }}"
-    state: absent
-  when: not _suffix_ready
-
-- name: Recovery — recreate data directory
-  ansible.builtin.file:
-    path: "{{ ds389.data_dir }}"
-    state: directory
-    mode: '0755'
-  when: not _suffix_ready
-
-- name: Recovery — start fresh 389 DS container
-  ansible.builtin.command: >
-    podman run -d
-    --name {{ ds389.container_name }}
-    -p {{ ds389_ldap_port }}:3389
-    -p {{ ds389_ldaps_port }}:3636
-    -v {{ ds389.data_dir }}:/data:Z
-    -e DS_DM_PASSWORD={{ ds389.root_password }}
-    {{ ds389.image }}
-  when: not _suffix_ready
-  changed_when: true
-  no_log: true
-
-- name: Recovery — wait for 389 DS to accept LDAP operations after restart
-  ansible.builtin.shell: >
-    ldapsearch -x
-    -H ldap://localhost:{{ ds389_ldap_port }}
-    -b '' -s base namingContexts 2>&1
-  register: _recovery_ldap_ready
-  until: _recovery_ldap_ready.rc == 0
-  retries: "{{ (ds389_init_timeout / 5) | int }}"
-  delay: 5
-  changed_when: false
-  when: not _suffix_ready
-
-# Create the backend database and base suffix entry explicitly.
-# --create-suffix adds the dc=... base entry immediately so callers
-# never need to add it themselves. Idempotent: already-exists is OK.
-# Add the backend instance config to cn=config via the host-side TCP connection
-# (the only reliable LDAP path we have). The backend + mapping tree entries
-# tell 389 DS about the new suffix. A container restart is then required to
-# initialise the database files on disk.
-- name: Add backend instance to cn=config
-  ansible.builtin.shell:
-    cmd: >
-      ldapadd -x
-      -H ldap://localhost:{{ ds389_ldap_port }}
-      -D '{{ ds389.root_dn }}'
-      -w '{{ ds389.root_password }}'
-    stdin: |
-      dn: cn=userroot,cn=ldbm database,cn=plugins,cn=config
-      objectClass: extensibleObject
-      objectClass: nsBackendInstance
-      cn: userroot
-      nsslapd-suffix: {{ ds389.suffix }}
-      nsslapd-cachesize: -1
-      nsslapd-cachememsize: 10485760
-      nsslapd-readonly: off
-  register: _result
-  changed_when: _result.rc == 0
-  failed_when: _result.rc not in [0, 68]
-  when: not _suffix_ready
-
-- name: Add mapping tree entry to cn=config
-  ansible.builtin.shell:
-    cmd: >
-      ldapadd -x
-      -H ldap://localhost:{{ ds389_ldap_port }}
-      -D '{{ ds389.root_dn }}'
-      -w '{{ ds389.root_password }}'
-    stdin: |
-      dn: cn="{{ ds389.suffix }}",cn=mapping tree,cn=config
-      objectClass: top
-      objectClass: extensibleObject
-      objectClass: nsMappingTree
-      cn: {{ ds389.suffix }}
-      nsslapd-state: backend
-      nsslapd-backend: userroot
-  register: _result
-  changed_when: _result.rc == 0
-  failed_when: _result.rc not in [0, 68]
-  when: not _suffix_ready
-
-- name: Restart 389 DS container to initialise backend database files
-  ansible.builtin.command: podman restart {{ ds389.container_name }}
-  changed_when: true
-  when: not _suffix_ready
-
-- name: Wait for 389 DS to accept LDAP operations after backend restart
-  ansible.builtin.shell: >
-    ldapsearch -x
-    -H ldap://localhost:{{ ds389_ldap_port }}
-    -b '' -s base namingContexts 2>&1
-  register: _post_restart_ready
-  until: _post_restart_ready.rc == 0
-  retries: "{{ (ds389_init_timeout / 5) | int }}"
-  delay: 5
-  changed_when: false
-  when: not _suffix_ready
-
-- name: Add base suffix entry
-  ansible.builtin.shell:
-    cmd: >
-      ldapadd -x
-      -H ldap://localhost:{{ ds389_ldap_port }}
-      -D '{{ ds389.root_dn }}'
-      -w '{{ ds389.root_password }}'
-    stdin: |
-      dn: {{ ds389.suffix }}
-      objectClass: top
-      objectClass: domain
-      dc: {{ ds389.suffix.split(',')[0].split('=')[1] }}
-  register: _result
-  changed_when: _result.rc == 0
-  failed_when: _result.rc not in [0, 68]
-  when: not _suffix_ready
-
-# --------------------------------------------------------------------------
-# Open port 389 for LDAP access from within the VPC.
-# Cluster nodes must reach the LDAP server — two layers:
-#   1. OS firewall (firewalld) — if running on the jumphost
-#   2. EC2 security group — inbound rule from the VPC CIDR
-# Both are idempotent: duplicate rules are silently ignored.
-# --------------------------------------------------------------------------
-- name: Check if firewalld is available
-  ansible.builtin.command: which firewall-cmd
-  register: _fw_available
-  changed_when: false
-  failed_when: false
-
-- name: Open port {{ ds389_ldap_port }} in firewalld
-  ansible.builtin.command: >
-    firewall-cmd --add-port={{ ds389_ldap_port }}/tcp --permanent
-  become: true
-  register: _fw_rule
-  changed_when: "'already' not in _fw_rule.stdout"
-  failed_when: _fw_rule.rc != 0 and 'NOT_RUNNING' not in _fw_rule.stderr
-  when: _fw_available.rc == 0
-
-- name: Reload firewalld to apply rule
-  ansible.builtin.command: firewall-cmd --reload
-  become: true
-  when: _fw_available.rc == 0 and _fw_rule is changed
-  changed_when: true
-  failed_when: false
-
-- name: Get VPC CIDR and security group IDs from EC2 metadata
+- name: Create backend and base entry via dsconf (suffix missing)
   ansible.builtin.shell: |
-    set -e
-    TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
-      -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)
-    HDR=""
-    [ -n "$TOKEN" ] && HDR="-H X-aws-ec2-metadata-token:$TOKEN"
-    BASE="http://169.254.169.254/latest/meta-data"
-    MAC=$(curl -sf $HDR $BASE/network/interfaces/macs/ | head -1 | tr -d '/')
-    echo "VPC_CIDR=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/vpc-ipv4-cidr-block)"
-    echo "SG_IDS=$(curl -sf $HDR $BASE/network/interfaces/macs/$MAC/security-group-ids | tr '\n' ' ')"
-  register: _ec2_meta
-  changed_when: false
-  failed_when: false
-
-- name: Parse VPC metadata facts
-  ansible.builtin.set_fact:
-    _ldap_vpc_cidr: "{{ _ec2_meta.stdout | regex_search('VPC_CIDR=(.+)', '\\1') | first | default('') }}"
-    _ldap_sg_ids:   "{{ (_ec2_meta.stdout | regex_search('SG_IDS=(.+)', '\\1') | first | default('')).split() }}"
-  when: _ec2_meta.rc == 0
-
-- name: Add port {{ ds389_ldap_port }} inbound rule to EC2 security groups
-  ansible.builtin.shell: >
-    /usr/local/bin/aws ec2 authorize-security-group-ingress
-    --group-id {{ item }}
-    --protocol tcp
-    --port {{ ds389_ldap_port }}
-    --cidr {{ _ldap_vpc_cidr }}
-    --region {{ aws.aws_region }} 2>&1
-  environment:
-    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
-  register: _sg_result
-  changed_when: _sg_result.rc == 0
+    {{ bin_dir | default('~/.local/bin') }}/oc exec \
+      -n {{ ds389.namespace }} \
+      deployment/{{ ds389.deployment_name }} \
+      --kubeconfig {{ hub_kubeconfig }} \
+      -- bash -c "
+        INSTANCE=\$(ls /etc/dirsrv/ 2>/dev/null | grep '^slapd-' | head -1 | sed 's/slapd-//')
+        if [ -z \"\$INSTANCE\" ]; then echo 'ERROR: no instance found' >&2; exit 1; fi
+        dsconf \"\$INSTANCE\" backend create \
+          --suffix '{{ ds389.suffix }}' \
+          --be-name userroot \
+          --create-suffix 2>&1
+      "
+  register: _backend_create
+  changed_when: _backend_create.rc == 0
   failed_when: >
-    _sg_result.rc != 0 and
-    'InvalidPermission.Duplicate' not in (_sg_result.stdout + _sg_result.stderr)
-  loop: "{{ _ldap_sg_ids | default([]) }}"
+    _backend_create.rc != 0 and
+    'already exists' not in (_backend_create.stdout + _backend_create.stderr) | lower
+  when: _suffix_check.rc == 32
+
+# --------------------------------------------------------------------------
+# Add read ACI so service account can search the directory
+# --------------------------------------------------------------------------
+- name: Add read ACI for authenticated users
+  ansible.builtin.shell: |
+    {{ bin_dir | default('~/.local/bin') }}/oc exec -i \
+      -n {{ ds389.namespace }} \
+      deployment/{{ ds389.deployment_name }} \
+      --kubeconfig {{ hub_kubeconfig }} \
+      -- ldapmodify -x \
+      -H ldap://localhost:{{ ds389.container_port }} \
+      -D '{{ ds389.root_dn }}' \
+      -w '{{ ds389.root_password }}' << 'LDIF'
+    dn: {{ ds389.suffix }}
+    changetype: modify
+    add: aci
+    aci: (targetattr="*")(version 3.0; acl "Allow authenticated read"; allow (read,search,compare) userdn="ldap:///all";)
+    LDIF
+  register: _aci_result
+  changed_when: _aci_result.rc == 0
+  failed_when: _aci_result.rc not in [0, 20]
   no_log: true
-  when:
-    - aws is defined
-    - (aws.aws_access_key_id | default('')) != ''
-    - (aws.aws_region | default('')) != ''
-    - (_ldap_vpc_cidr | default('')) != ''
-    - (_ldap_sg_ids | default([]) | length) > 0
-
-# --------------------------------------------------------------------------
-# Systemd unit for persistence across reboots
-# --------------------------------------------------------------------------
-- name: Check if systemd unit already exists
-  ansible.builtin.stat:
-    path: "/etc/systemd/system/container-{{ ds389.container_name }}.service"
-  register: _unit_stat
-
-- name: Generate systemd unit for 389 DS container
-  ansible.builtin.command: >
-    podman generate systemd
-    --name {{ ds389.container_name }}
-    --restart-policy=always
-    --files
-  args:
-    chdir: /etc/systemd/system
-  changed_when: true
-  when: not _unit_stat.stat.exists
-
-- name: Enable 389 DS container service
-  ansible.builtin.systemd:
-    daemon_reload: true
-    name: "container-{{ ds389.container_name }}.service"
-    enabled: true
-  when: not _unit_stat.stat.exists
 
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
+- name: Set internal LDAP service URL
+  ansible.builtin.set_fact:
+    _ldap_svc_url: "ldap://{{ ds389.service_name }}.{{ ds389.namespace }}.svc.cluster.local:389"
+
 - name: Print 389 DS connection details
   ansible.builtin.debug:
     msg:
       - "======================================================================"
-      - "389 Directory Server Ready"
+      - "389 Directory Server Ready (running inside OCP)"
       - "======================================================================"
-      - "Private IP:   {{ ansible_default_ipv4.address }}"
-      - "  (use this in OCP inventory — reachable inside the VPC)"
+      - "Deployment:  {{ ds389.namespace }}/{{ ds389.deployment_name }}"
       - ""
-      - "LDAP:         ldap://{{ ansible_default_ipv4.address }}:{{ ds389_ldap_port }}"
-      - "LDAPS:        ldaps://{{ ansible_default_ipv4.address }}:{{ ds389_ldaps_port }}"
-      - "Suffix:       {{ ds389.suffix }}"
-      - "Root DN:      {{ ds389.root_dn }}"
+      - "LDAP URL:    {{ _ldap_svc_url }}"
+      - "  (cluster-internal — reachable from all pods and OCP controllers)"
+      - ""
+      - "Suffix:      {{ ds389.suffix }}"
+      - "Root DN:     {{ ds389.root_dn }}"
       - "======================================================================"
