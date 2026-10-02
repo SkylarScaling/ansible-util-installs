@@ -248,6 +248,79 @@
     - _worker_sg.stdout is defined
     - _worker_sg.stdout | trim not in ['None', '']
 
+- name: Wait for NLB security group to be assigned to the load balancer
+  ansible.builtin.shell: >
+    /usr/local/bin/aws elbv2 describe-load-balancers
+    --region {{ aws.aws_region }}
+    --query "LoadBalancers[?contains(DNSName, '{{ ds389.service_name }}')].SecurityGroups | [0][0]"
+    --output text 2>/dev/null || true
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _nlb_sg_check
+  until: _nlb_sg_check.stdout | trim | length > 0
+  retries: 20
+  delay: 15
+  changed_when: false
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _worker_sg.stdout is defined
+
+- name: Get NLB ARN to find its security group
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc get service {{ ds389.service_name }}
+    -n {{ ds389.namespace }}
+    --kubeconfig {{ hub_kubeconfig }}
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null
+  register: _svc_lb_hostname
+  changed_when: false
+  become: false
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _worker_sg.stdout is defined
+
+- name: Get NLB security group ID
+  ansible.builtin.shell: >
+    /usr/local/bin/aws elbv2 describe-load-balancers
+    --region {{ aws.aws_region }}
+    --query "LoadBalancers[?DNSName=='{{ _svc_lb_hostname.stdout | trim }}'].SecurityGroups | [0][0]"
+    --output text
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _nlb_sg_id
+  changed_when: false
+  retries: 10
+  delay: 15
+  until: _nlb_sg_id.stdout | trim | length > 0
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _svc_lb_hostname.stdout is defined
+    - _svc_lb_hostname.stdout | trim != ''
+
+- name: Open LDAP port 389 on NLB security group
+  ansible.builtin.shell: >
+    /usr/local/bin/aws ec2 authorize-security-group-ingress
+    --region {{ aws.aws_region }}
+    --group-id {{ _nlb_sg_id.stdout | trim }}
+    --protocol tcp --port 389 --cidr 0.0.0.0/0 2>&1
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _nlb_sg_rule
+  changed_when: _nlb_sg_rule.rc == 0
+  failed_when: >
+    _nlb_sg_rule.rc != 0 and
+    'InvalidPermission.Duplicate' not in (_nlb_sg_rule.stdout + _nlb_sg_rule.stderr)
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _nlb_sg_id.stdout is defined
+    - _nlb_sg_id.stdout | trim not in ['None', '']
+
 - name: Wait for LoadBalancer DNS to be assigned
   ansible.builtin.shell: >
     {{ bin_dir | default('~/.local/bin') }}/oc get service {{ ds389.service_name }}
