@@ -193,12 +193,27 @@
   changed_when: false
   become: false
 
-- name: Get worker node security group ID
+- name: Get worker node instance ID
   ansible.builtin.shell: >
-    /usr/local/bin/aws ec2 describe-security-groups
+    {{ bin_dir | default('~/.local/bin') }}/oc get nodes
+    --kubeconfig {{ hub_kubeconfig }}
+    -l node-role.kubernetes.io/worker
+    -o jsonpath='{.items[0].spec.providerID}'
+    | sed 's|aws:///[^/]*/||'
+  register: _worker_instance_id
+  changed_when: false
+  become: false
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _node_port.stdout != ''
+
+- name: Get worker node security group ID from instance
+  ansible.builtin.shell: >
+    /usr/local/bin/aws ec2 describe-instances
     --region {{ aws.aws_region }}
-    --filters "Name=tag:Name,Values={{ _infra_name.stdout | trim }}-worker-sg"
-    --query 'SecurityGroups[0].GroupId'
+    --instance-ids {{ _worker_instance_id.stdout | trim }}
+    --query 'Reservations[0].Instances[0].SecurityGroups[?contains(GroupName, `worker`)].GroupId | [0]'
     --output text
   environment:
     AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
@@ -208,8 +223,8 @@
   when:
     - aws is defined
     - (aws.aws_access_key_id | default('')) != ''
-    - _node_port.stdout != ''
-    - _infra_name.stdout != ''
+    - _worker_instance_id.stdout is defined
+    - _worker_instance_id.stdout | trim != ''
 
 - name: Open node port on worker security group for NLB health checks and traffic
   ansible.builtin.shell: >
