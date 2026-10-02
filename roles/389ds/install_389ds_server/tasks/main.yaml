@@ -174,6 +174,65 @@
   changed_when: true
   become: false
 
+- name: Get node port assigned to ds389 service
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc get service {{ ds389.service_name }}
+    -n {{ ds389.namespace }}
+    --kubeconfig {{ hub_kubeconfig }}
+    -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null
+  register: _node_port
+  changed_when: false
+  become: false
+
+- name: Get cluster infrastructure name
+  ansible.builtin.shell: >
+    {{ bin_dir | default('~/.local/bin') }}/oc get infrastructure cluster
+    --kubeconfig {{ hub_kubeconfig }}
+    -o jsonpath='{.status.infrastructureName}' 2>/dev/null
+  register: _infra_name
+  changed_when: false
+  become: false
+
+- name: Get worker node security group ID
+  ansible.builtin.shell: >
+    /usr/local/bin/aws ec2 describe-security-groups
+    --region {{ aws.aws_region }}
+    --filters "Name=tag:Name,Values={{ _infra_name.stdout | trim }}-worker-sg"
+    --query 'SecurityGroups[0].GroupId'
+    --output text
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _worker_sg
+  changed_when: false
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _node_port.stdout != ''
+    - _infra_name.stdout != ''
+
+- name: Open node port on worker security group for NLB health checks and traffic
+  ansible.builtin.shell: >
+    /usr/local/bin/aws ec2 authorize-security-group-ingress
+    --region {{ aws.aws_region }}
+    --group-id {{ _worker_sg.stdout | trim }}
+    --protocol tcp
+    --port {{ _node_port.stdout | trim }}
+    --cidr 0.0.0.0/0 2>&1
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws.aws_secret_access_key }}"
+  register: _sg_node_port
+  changed_when: _sg_node_port.rc == 0
+  failed_when: >
+    _sg_node_port.rc != 0 and
+    'InvalidPermission.Duplicate' not in (_sg_node_port.stdout + _sg_node_port.stderr)
+  when:
+    - aws is defined
+    - (aws.aws_access_key_id | default('')) != ''
+    - _worker_sg.stdout is defined
+    - _worker_sg.stdout | trim not in ['None', '']
+
 - name: Wait for LoadBalancer DNS to be assigned
   ansible.builtin.shell: >
     {{ bin_dir | default('~/.local/bin') }}/oc get service {{ ds389.service_name }}
