@@ -213,7 +213,7 @@
     /usr/local/bin/aws ec2 describe-instances
     --region {{ aws.aws_region }}
     --instance-ids {{ _worker_instance_id.stdout | trim }}
-    --query 'Reservations[0].Instances[0].SecurityGroups[?contains(GroupName, `worker`)].GroupId | [0]'
+    --query 'Reservations[0].Instances[0].SecurityGroups[?contains(GroupName, `node`)].GroupId | [0]'
     --output text
   environment:
     AWS_ACCESS_KEY_ID: "{{ aws.aws_access_key_id }}"
